@@ -6,7 +6,9 @@
 //! containers, signature encodings, authorization policy, persistence, and
 //! error mapping.
 
+pub mod brainpool512;
 pub mod post_quantum;
 pub mod rsa_signing;
 pub mod software_key_agreement;
 pub mod software_signing;
+pub mod software_symmetric;

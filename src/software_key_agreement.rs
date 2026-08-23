@@ -110,10 +110,14 @@ pub fn derive_with_signing_key(
     peer_public_key: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, SoftwareKeyAgreementError> {
     match private_key {
+        SoftwareSigningKey::P224(key) => derive_weierstrass(key, peer_public_key),
         SoftwareSigningKey::P256(key) => derive_weierstrass(key, peer_public_key),
         SoftwareSigningKey::P384(key) => derive_weierstrass(key, peer_public_key),
         SoftwareSigningKey::P521(key) => derive_weierstrass(key, peer_public_key),
         SoftwareSigningKey::K256(key) => derive_weierstrass(key, peer_public_key),
+        SoftwareSigningKey::BrainpoolP256(key) => derive_weierstrass(key, peer_public_key),
+        SoftwareSigningKey::BrainpoolP384(key) => derive_weierstrass(key, peer_public_key),
+        SoftwareSigningKey::BrainpoolP512(key) => derive_weierstrass(key, peer_public_key),
         SoftwareSigningKey::Ed25519(_)
         | SoftwareSigningKey::Rsa(_)
         | SoftwareSigningKey::MlDsa(_) => Err(SoftwareKeyAgreementError::AlgorithmMismatch),
@@ -128,10 +132,14 @@ mod tests {
     #[test]
     fn every_shared_weierstrass_curve_agrees() {
         for algorithm in [
+            SoftwareSigningAlgorithm::EcdsaP224Sha224,
             SoftwareSigningAlgorithm::EcdsaP256Sha256,
             SoftwareSigningAlgorithm::EcdsaP384Sha384,
             SoftwareSigningAlgorithm::EcdsaP521Sha512,
             SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256,
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384,
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512,
         ] {
             let first = SoftwareSigningKey::generate(algorithm).unwrap();
             let second = SoftwareSigningKey::generate(algorithm).unwrap();

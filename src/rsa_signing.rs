@@ -4,10 +4,11 @@
 //! operations, PKCS #1 v1.5 signature padding and DigestInfo values, and
 //! RSASSA-PSS encoding with independent message and MGF1 hash algorithms.
 
-use rsa::{traits::PublicKeyParts, BigUint, RsaPrivateKey, RsaPublicKey};
+use rsa::{traits::PublicKeyParts, BigUint, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use sha1::Sha1;
 use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
 use sha3::{Sha3_224, Sha3_256, Sha3_384, Sha3_512};
+use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RsaHashAlgorithm {
@@ -241,6 +242,123 @@ fn mgf1(seed: &[u8], length: usize, hash: RsaHashAlgorithm) -> Result<Vec<u8>, R
     }
     output.truncate(length);
     Ok(output)
+}
+
+/// Decrypt an RSAES-PKCS1-v1_5 ciphertext and validate its type-2 encoding.
+pub fn rsa_decrypt_pkcs1v15(
+    key: &RsaPrivateKey,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, RsaSignatureError> {
+    if ciphertext.len() != key.size() {
+        return Err(RsaSignatureError::InputTooLong);
+    }
+    key.decrypt_blinded(&mut rsa::rand_core::OsRng, Pkcs1v15Encrypt, ciphertext)
+        .map_err(|_| RsaSignatureError::OperationFailed)
+}
+
+pub fn rsa_encrypt_pkcs1v15(
+    key: &RsaPublicKey,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, RsaSignatureError> {
+    if plaintext.len() > key.size().saturating_sub(11) {
+        return Err(RsaSignatureError::InputTooLong);
+    }
+    let padding_length = key.size() - plaintext.len() - 3;
+    let mut padding = vec![0; padding_length];
+    for byte in &mut padding {
+        while *byte == 0 {
+            getrandom::fill(core::slice::from_mut(byte))
+                .map_err(|_| RsaSignatureError::RandomnessUnavailable)?;
+        }
+    }
+    let mut encoded = Vec::with_capacity(key.size());
+    encoded.extend_from_slice(&[0, 2]);
+    encoded.extend_from_slice(&padding);
+    encoded.push(0);
+    encoded.extend_from_slice(plaintext);
+    public_operation(key, &encoded)
+}
+
+/// Decrypt RSAES-OAEP where the caller supplies the already-computed label
+/// digest, as required by the YubiHSM command protocol.
+pub fn rsa_decrypt_oaep_digest(
+    key: &RsaPrivateKey,
+    ciphertext: &[u8],
+    label_digest: &[u8],
+    mgf_hash: RsaHashAlgorithm,
+) -> Result<Vec<u8>, RsaSignatureError> {
+    if ciphertext.len() != key.size() || !matches!(label_digest.len(), 20 | 32 | 48 | 64) {
+        return Err(RsaSignatureError::InputTooLong);
+    }
+    let encoded = private_operation(key, ciphertext)?;
+    let hash_length = label_digest.len();
+    if encoded.len() < 2 * hash_length + 2 {
+        return Err(RsaSignatureError::OperationFailed);
+    }
+    let (masked_seed, masked_db) = encoded[1..].split_at(hash_length);
+    let seed_mask = mgf1(masked_db, hash_length, mgf_hash)?;
+    let seed = masked_seed
+        .iter()
+        .zip(seed_mask)
+        .map(|(value, mask)| value ^ mask)
+        .collect::<Vec<_>>();
+    let db_mask = mgf1(&seed, masked_db.len(), mgf_hash)?;
+    let db = masked_db
+        .iter()
+        .zip(db_mask)
+        .map(|(value, mask)| value ^ mask)
+        .collect::<Vec<_>>();
+    let mut valid = encoded[0].ct_eq(&0) & db[..hash_length].ct_eq(label_digest);
+    let rest = &db[hash_length..];
+    let mut looking = Choice::from(1);
+    let mut separator = 0_u64;
+    for (index, value) in rest.iter().enumerate() {
+        let is_zero = value.ct_eq(&0);
+        let is_one = value.ct_eq(&1);
+        let select = looking & is_one;
+        separator = u64::conditional_select(&separator, &(index as u64), select);
+        valid &= !(looking & !is_zero & !is_one);
+        looking &= !is_one;
+    }
+    valid &= !looking;
+    if !bool::from(valid) {
+        return Err(RsaSignatureError::OperationFailed);
+    }
+    Ok(rest[separator as usize + 1..].to_vec())
+}
+
+pub fn rsa_encrypt_oaep_digest(
+    key: &RsaPublicKey,
+    plaintext: &[u8],
+    label_digest: &[u8],
+    mgf_hash: RsaHashAlgorithm,
+) -> Result<Vec<u8>, RsaSignatureError> {
+    if !matches!(label_digest.len(), 20 | 32 | 48 | 64) {
+        return Err(RsaSignatureError::InvalidDigestLength);
+    }
+    let hash_length = label_digest.len();
+    if plaintext.len() > key.size().saturating_sub(2 * hash_length + 2) {
+        return Err(RsaSignatureError::InputTooLong);
+    }
+    let mut db = label_digest.to_vec();
+    db.resize(key.size() - hash_length - plaintext.len() - 2, 0);
+    db.push(1);
+    db.extend_from_slice(plaintext);
+    let mut seed = vec![0; hash_length];
+    getrandom::fill(&mut seed).map_err(|_| RsaSignatureError::RandomnessUnavailable)?;
+    let db_mask = mgf1(&seed, db.len(), mgf_hash)?;
+    for (value, mask) in db.iter_mut().zip(db_mask) {
+        *value ^= mask;
+    }
+    let seed_mask = mgf1(&db, seed.len(), mgf_hash)?;
+    for (value, mask) in seed.iter_mut().zip(seed_mask) {
+        *value ^= mask;
+    }
+    let mut encoded = Vec::with_capacity(key.size());
+    encoded.push(0);
+    encoded.extend_from_slice(&seed);
+    encoded.extend_from_slice(&db);
+    public_operation(key, &encoded)
 }
 
 fn pss_encoded_digest(

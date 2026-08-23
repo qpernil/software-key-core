@@ -7,16 +7,24 @@
 //! and error mapping.
 
 use crate::{
+    brainpool512::{BrainpoolP512r1, SecretKey as BrainpoolP512SecretKey},
     post_quantum::{verify_ml_dsa, MlDsaParameterSet, MlDsaPrivateKey},
     rsa_signing::{
-        rsa_sign_pkcs1v15_digest, rsa_sign_pss_digest, rsa_sign_raw, rsa_verify_pkcs1v15_digest,
-        rsa_verify_pss_digest, rsa_verify_raw, RsaHashAlgorithm, RsaPssParameters,
-        RsaSignatureError,
+        rsa_decrypt_oaep_digest, rsa_decrypt_pkcs1v15, rsa_encrypt_oaep_digest,
+        rsa_encrypt_pkcs1v15, rsa_sign_pkcs1v15_digest, rsa_sign_pkcs1v15_payload,
+        rsa_sign_pss_digest, rsa_sign_raw, rsa_verify_pkcs1v15_digest, rsa_verify_pss_digest,
+        rsa_verify_raw, RsaHashAlgorithm, RsaPssParameters, RsaSignatureError,
     },
 };
+use bp256::r1::SecretKey as BrainpoolP256SecretKey;
+use bp384::r1::SecretKey as BrainpoolP384SecretKey;
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
+use elliptic_curve::pkcs8::{
+    DecodePrivateKey as DecodeEcPrivateKey, EncodePrivateKey as EncodeEcPrivateKey,
+};
 use k256::ecdsa::SigningKey as K256SigningKey;
 use k256::SecretKey as K256SecretKey;
+use p224::SecretKey as P224SecretKey;
 use p256::ecdsa::SigningKey as P256SigningKey;
 use p256::elliptic_curve::sec1::ToSec1Point;
 use p256::SecretKey as P256SecretKey;
@@ -24,7 +32,9 @@ use p384::ecdsa::SigningKey as P384SigningKey;
 use p384::SecretKey as P384SecretKey;
 use p521::ecdsa::SigningKey as P521SigningKey;
 use p521::SecretKey as P521SecretKey;
-use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey};
+use rsa::pkcs8::{
+    DecodePrivateKey as DecodeRsaPrivateKey, EncodePrivateKey as EncodeRsaPrivateKey,
+};
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use signature::hazmat::{PrehashSigner, PrehashVerifier};
@@ -34,11 +44,15 @@ use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SoftwareSigningAlgorithm {
+    EcdsaP224Sha224,
     EcdsaP256Sha256,
     Ed25519,
     EcdsaP384Sha384,
     EcdsaP521Sha512,
     EcdsaSecp256k1Sha256,
+    EcdsaBrainpoolP256Sha256,
+    EcdsaBrainpoolP384Sha384,
+    EcdsaBrainpoolP512Sha512,
     RsaPssSha256,
     RsaPssSha384,
     RsaPssSha512,
@@ -74,10 +88,14 @@ pub enum SoftwareSigningError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EcCurve {
+    P224,
     P256,
     P384,
     P521,
     Secp256k1,
+    BrainpoolP256,
+    BrainpoolP384,
+    BrainpoolP512,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -119,7 +137,55 @@ macro_rules! verify_ecdsa_prehash {
     }};
 }
 
+macro_rules! verify_generic_ecdsa {
+    ($curve:ty, $public:expr, $message:expr, $signature:expr) => {{
+        let key = ecdsa::VerifyingKey::<$curve>::from_sec1_bytes($public)
+            .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
+        let signature = ecdsa::Signature::<$curve>::from_slice($signature)
+            .map_err(|_| SoftwareSigningError::InvalidSignature)?;
+        key.verify($message, &signature)
+            .map_err(|_| SoftwareSigningError::InvalidSignature)
+    }};
+}
+
+macro_rules! verify_generic_ecdsa_prehash {
+    ($curve:ty, $public:expr, $prehash:expr, $signature:expr) => {{
+        let key = ecdsa::VerifyingKey::<$curve>::from_sec1_bytes($public)
+            .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
+        let signature = ecdsa::Signature::<$curve>::from_slice($signature)
+            .map_err(|_| SoftwareSigningError::InvalidSignature)?;
+        key.verify_prehash($prehash, &signature)
+            .map_err(|_| SoftwareSigningError::InvalidSignature)
+    }};
+}
+
 impl SoftwarePublicKey {
+    pub fn encrypt_rsa_pkcs1v15(&self, plaintext: &[u8]) -> Result<Vec<u8>, SoftwareSigningError> {
+        let Self::Rsa { modulus, exponent } = self else {
+            return Err(SoftwareSigningError::AlgorithmMismatch);
+        };
+        rsa_encrypt_pkcs1v15(&rsa_public_key(modulus, exponent)?, plaintext)
+            .map_err(map_rsa_signing_error)
+    }
+
+    pub fn encrypt_rsa_oaep_digest(
+        &self,
+        plaintext: &[u8],
+        label_digest: &[u8],
+        mgf_hash: RsaHashAlgorithm,
+    ) -> Result<Vec<u8>, SoftwareSigningError> {
+        let Self::Rsa { modulus, exponent } = self else {
+            return Err(SoftwareSigningError::AlgorithmMismatch);
+        };
+        rsa_encrypt_oaep_digest(
+            &rsa_public_key(modulus, exponent)?,
+            plaintext,
+            label_digest,
+            mgf_hash,
+        )
+        .map_err(map_rsa_signing_error)
+    }
+
     /// Verify a raw RSA private-key operation against the caller-supplied
     /// modulus-width encoded input.
     pub fn verify_rsa_raw(
@@ -146,6 +212,13 @@ impl SoftwarePublicKey {
         signature: &[u8],
     ) -> Result<(), SoftwareSigningError> {
         match (algorithm, self) {
+            (
+                SoftwareSigningAlgorithm::EcdsaP224Sha224,
+                Self::Ec {
+                    curve: EcCurve::P224,
+                    uncompressed,
+                },
+            ) => verify_ecdsa!(p224, uncompressed, message, signature),
             (
                 SoftwareSigningAlgorithm::EcdsaP256Sha256,
                 Self::Ec {
@@ -174,6 +247,20 @@ impl SoftwarePublicKey {
                     uncompressed,
                 },
             ) => verify_ecdsa!(k256, uncompressed, message, signature),
+            (
+                SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256,
+                Self::Ec {
+                    curve: EcCurve::BrainpoolP256,
+                    uncompressed,
+                },
+            ) => verify_generic_ecdsa!(bp256::BrainpoolP256r1, uncompressed, message, signature),
+            (
+                SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384,
+                Self::Ec {
+                    curve: EcCurve::BrainpoolP384,
+                    uncompressed,
+                },
+            ) => verify_generic_ecdsa!(bp384::BrainpoolP384r1, uncompressed, message, signature),
             (SoftwareSigningAlgorithm::Ed25519, Self::Ed25519(public)) => {
                 let key = ed25519_dalek::VerifyingKey::from_bytes(public)
                     .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
@@ -224,6 +311,13 @@ impl SoftwarePublicKey {
     ) -> Result<(), SoftwareSigningError> {
         match (algorithm, self) {
             (
+                SoftwareSigningAlgorithm::EcdsaP224Sha224,
+                Self::Ec {
+                    curve: EcCurve::P224,
+                    uncompressed,
+                },
+            ) => verify_ecdsa_prehash!(p224, uncompressed, prehash, signature),
+            (
                 SoftwareSigningAlgorithm::EcdsaP256Sha256,
                 Self::Ec {
                     curve: EcCurve::P256,
@@ -251,6 +345,30 @@ impl SoftwarePublicKey {
                     uncompressed,
                 },
             ) => verify_ecdsa_prehash!(k256, uncompressed, prehash, signature),
+            (
+                SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256,
+                Self::Ec {
+                    curve: EcCurve::BrainpoolP256,
+                    uncompressed,
+                },
+            ) => verify_generic_ecdsa_prehash!(
+                bp256::BrainpoolP256r1,
+                uncompressed,
+                prehash,
+                signature
+            ),
+            (
+                SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384,
+                Self::Ec {
+                    curve: EcCurve::BrainpoolP384,
+                    uncompressed,
+                },
+            ) => verify_generic_ecdsa_prehash!(
+                bp384::BrainpoolP384r1,
+                uncompressed,
+                prehash,
+                signature
+            ),
             (
                 algorithm @ (SoftwareSigningAlgorithm::RsaPssSha256
                 | SoftwareSigningAlgorithm::RsaPssSha384
@@ -369,11 +487,15 @@ impl SoftwareSignature {
 
 #[derive(Clone)]
 pub enum SoftwareSigningKey {
+    P224(P224SecretKey),
     P256(P256SecretKey),
     Ed25519(Ed25519SigningKey),
     P384(P384SecretKey),
     P521(P521SecretKey),
     K256(K256SecretKey),
+    BrainpoolP256(BrainpoolP256SecretKey),
+    BrainpoolP384(BrainpoolP384SecretKey),
+    BrainpoolP512(BrainpoolP512SecretKey),
     Rsa(Box<RsaPrivateKey>),
     MlDsa(MlDsaPrivateKey),
 }
@@ -388,8 +510,88 @@ impl fmt::Debug for SoftwareSigningKey {
 }
 
 impl SoftwareSigningKey {
+    /// Import the PKCS#8 `PrivateKeyInfo` representation used by YubiHSM's
+    /// RSA-wrapped asymmetric-key commands.
+    pub fn from_pkcs8_der(
+        algorithm: SoftwareSigningAlgorithm,
+        serialized: &[u8],
+    ) -> Result<Self, SoftwareSigningError> {
+        match algorithm {
+            SoftwareSigningAlgorithm::EcdsaP224Sha224 => {
+                P224SecretKey::from_pkcs8_der(serialized).map(Self::P224)
+            }
+            SoftwareSigningAlgorithm::EcdsaP256Sha256 => {
+                P256SecretKey::from_pkcs8_der(serialized).map(Self::P256)
+            }
+            SoftwareSigningAlgorithm::Ed25519 => {
+                Ed25519SigningKey::from_pkcs8_der(serialized).map(Self::Ed25519)
+            }
+            SoftwareSigningAlgorithm::EcdsaP384Sha384 => {
+                P384SecretKey::from_pkcs8_der(serialized).map(Self::P384)
+            }
+            SoftwareSigningAlgorithm::EcdsaP521Sha512 => {
+                P521SecretKey::from_pkcs8_der(serialized).map(Self::P521)
+            }
+            SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256 => {
+                K256SecretKey::from_pkcs8_der(serialized).map(Self::K256)
+            }
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256 => {
+                BrainpoolP256SecretKey::from_pkcs8_der(serialized).map(Self::BrainpoolP256)
+            }
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384 => {
+                BrainpoolP384SecretKey::from_pkcs8_der(serialized).map(Self::BrainpoolP384)
+            }
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512 => {
+                BrainpoolP512SecretKey::from_pkcs8_der(serialized).map(Self::BrainpoolP512)
+            }
+            SoftwareSigningAlgorithm::RsaPssSha256
+            | SoftwareSigningAlgorithm::RsaPssSha384
+            | SoftwareSigningAlgorithm::RsaPssSha512
+            | SoftwareSigningAlgorithm::RsaPkcs1Sha256
+            | SoftwareSigningAlgorithm::RsaPkcs1Sha384
+            | SoftwareSigningAlgorithm::RsaPkcs1Sha512 => {
+                let mut key = RsaPrivateKey::from_pkcs8_der(serialized)
+                    .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
+                key.precompute()
+                    .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
+                return Ok(Self::Rsa(Box::new(key)));
+            }
+            SoftwareSigningAlgorithm::MlDsa(_) => {
+                return Err(SoftwareSigningError::AlgorithmMismatch);
+            }
+        }
+        .map_err(|_| SoftwareSigningError::InvalidPrivateKey)
+    }
+
+    /// Export the PKCS#8 `PrivateKeyInfo` representation used by YubiHSM's
+    /// RSA-wrapped asymmetric-key commands.
+    pub fn to_pkcs8_der(&self) -> Result<Zeroizing<Vec<u8>>, SoftwareSigningError> {
+        let encoded = match self {
+            Self::P224(key) => key.to_pkcs8_der(),
+            Self::P256(key) => key.to_pkcs8_der(),
+            Self::Ed25519(key) => key.to_pkcs8_der(),
+            Self::P384(key) => key.to_pkcs8_der(),
+            Self::P521(key) => key.to_pkcs8_der(),
+            Self::K256(key) => key.to_pkcs8_der(),
+            Self::BrainpoolP256(key) => key.to_pkcs8_der(),
+            Self::BrainpoolP384(key) => key.to_pkcs8_der(),
+            Self::BrainpoolP512(key) => key.to_pkcs8_der(),
+            Self::Rsa(key) => {
+                return key
+                    .to_pkcs8_der()
+                    .map(|value| Zeroizing::new(value.as_bytes().to_vec()))
+                    .map_err(|_| SoftwareSigningError::InvalidPrivateKey);
+            }
+            Self::MlDsa(_) => return Err(SoftwareSigningError::AlgorithmMismatch),
+        }
+        .map(|value| Zeroizing::new(value.as_bytes().to_vec()))
+        .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
+        Ok(encoded)
+    }
+
     pub fn generate(algorithm: SoftwareSigningAlgorithm) -> Result<Self, SoftwareSigningError> {
         match algorithm {
+            SoftwareSigningAlgorithm::EcdsaP224Sha224 => random_p224_secret().map(Self::P224),
             SoftwareSigningAlgorithm::EcdsaP256Sha256 => random_p256_secret().map(Self::P256),
             SoftwareSigningAlgorithm::Ed25519 => {
                 let mut seed = Zeroizing::new([0_u8; 32]);
@@ -400,6 +602,15 @@ impl SoftwareSigningKey {
             SoftwareSigningAlgorithm::EcdsaP384Sha384 => random_p384_secret().map(Self::P384),
             SoftwareSigningAlgorithm::EcdsaP521Sha512 => random_p521_secret().map(Self::P521),
             SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256 => random_k256_secret().map(Self::K256),
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256 => {
+                random_brainpool_p256_secret().map(Self::BrainpoolP256)
+            }
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384 => {
+                random_brainpool_p384_secret().map(Self::BrainpoolP384)
+            }
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512 => {
+                random_brainpool_p512_secret().map(Self::BrainpoolP512)
+            }
             SoftwareSigningAlgorithm::RsaPssSha256
             | SoftwareSigningAlgorithm::RsaPssSha384
             | SoftwareSigningAlgorithm::RsaPssSha512
@@ -451,6 +662,9 @@ impl SoftwareSigningKey {
         serialized: &[u8],
     ) -> Result<Self, SoftwareSigningError> {
         match algorithm {
+            SoftwareSigningAlgorithm::EcdsaP224Sha224 => P224SecretKey::from_slice(serialized)
+                .map(Self::P224)
+                .map_err(|_| SoftwareSigningError::InvalidPrivateKey),
             SoftwareSigningAlgorithm::EcdsaP256Sha256 => P256SecretKey::from_slice(serialized)
                 .map(Self::P256)
                 .map_err(|_| SoftwareSigningError::InvalidPrivateKey),
@@ -469,6 +683,21 @@ impl SoftwareSigningKey {
             SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256 => K256SecretKey::from_slice(serialized)
                 .map(Self::K256)
                 .map_err(|_| SoftwareSigningError::InvalidPrivateKey),
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256 => {
+                BrainpoolP256SecretKey::from_slice(serialized)
+                    .map(Self::BrainpoolP256)
+                    .map_err(|_| SoftwareSigningError::InvalidPrivateKey)
+            }
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384 => {
+                BrainpoolP384SecretKey::from_slice(serialized)
+                    .map(Self::BrainpoolP384)
+                    .map_err(|_| SoftwareSigningError::InvalidPrivateKey)
+            }
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512 => {
+                BrainpoolP512SecretKey::from_slice(serialized)
+                    .map(Self::BrainpoolP512)
+                    .map_err(|_| SoftwareSigningError::InvalidPrivateKey)
+            }
             SoftwareSigningAlgorithm::RsaPssSha256
             | SoftwareSigningAlgorithm::RsaPssSha384
             | SoftwareSigningAlgorithm::RsaPssSha512
@@ -491,11 +720,15 @@ impl SoftwareSigningKey {
 
     const fn kind_name(&self) -> &'static str {
         match self {
+            Self::P224(_) => "P-224",
             Self::P256(_) => "P-256",
             Self::Ed25519(_) => "Ed25519",
             Self::P384(_) => "P-384",
             Self::P521(_) => "P-521",
             Self::K256(_) => "secp256k1",
+            Self::BrainpoolP256(_) => "brainpoolP256r1",
+            Self::BrainpoolP384(_) => "brainpoolP384r1",
+            Self::BrainpoolP512(_) => "brainpoolP512r1",
             Self::Rsa(_) => "RSA",
             Self::MlDsa(_) => "ML-DSA",
         }
@@ -503,11 +736,15 @@ impl SoftwareSigningKey {
 
     pub fn serialized(&self) -> Result<Zeroizing<Vec<u8>>, SoftwareSigningError> {
         let serialized = match self {
+            Self::P224(key) => key.to_bytes().to_vec(),
             Self::P256(key) => key.to_bytes().to_vec(),
             Self::Ed25519(key) => key.to_bytes().to_vec(),
             Self::P384(key) => key.to_bytes().to_vec(),
             Self::P521(key) => key.to_bytes().to_vec(),
             Self::K256(key) => key.to_bytes().to_vec(),
+            Self::BrainpoolP256(key) => key.to_bytes().to_vec(),
+            Self::BrainpoolP384(key) => key.to_bytes().to_vec(),
+            Self::BrainpoolP512(key) => key.to_bytes().to_vec(),
             Self::Rsa(key) => key
                 .to_pkcs8_der()
                 .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?
@@ -520,6 +757,10 @@ impl SoftwareSigningKey {
 
     pub fn public_key(&self) -> SoftwarePublicKey {
         match self {
+            Self::P224(key) => SoftwarePublicKey::Ec {
+                curve: EcCurve::P224,
+                uncompressed: key.public_key().to_sec1_point(false).as_bytes().to_vec(),
+            },
             Self::P256(key) => SoftwarePublicKey::Ec {
                 curve: EcCurve::P256,
                 uncompressed: key.public_key().to_sec1_point(false).as_bytes().to_vec(),
@@ -535,6 +776,18 @@ impl SoftwareSigningKey {
             },
             Self::K256(key) => SoftwarePublicKey::Ec {
                 curve: EcCurve::Secp256k1,
+                uncompressed: key.public_key().to_sec1_point(false).as_bytes().to_vec(),
+            },
+            Self::BrainpoolP256(key) => SoftwarePublicKey::Ec {
+                curve: EcCurve::BrainpoolP256,
+                uncompressed: key.public_key().to_sec1_point(false).as_bytes().to_vec(),
+            },
+            Self::BrainpoolP384(key) => SoftwarePublicKey::Ec {
+                curve: EcCurve::BrainpoolP384,
+                uncompressed: key.public_key().to_sec1_point(false).as_bytes().to_vec(),
+            },
+            Self::BrainpoolP512(key) => SoftwarePublicKey::Ec {
+                curve: EcCurve::BrainpoolP512,
                 uncompressed: key.public_key().to_sec1_point(false).as_bytes().to_vec(),
             },
             Self::Rsa(key) => SoftwarePublicKey::Rsa {
@@ -554,6 +807,11 @@ impl SoftwareSigningKey {
         message: &[u8],
     ) -> Result<SoftwareSignature, SoftwareSigningError> {
         let signature = match (algorithm, self) {
+            (SoftwareSigningAlgorithm::EcdsaP224Sha224, Self::P224(key)) => {
+                let signature: p224::ecdsa::Signature =
+                    p224::ecdsa::SigningKey::from(key.clone()).sign(message);
+                signature.to_bytes().to_vec()
+            }
             (SoftwareSigningAlgorithm::EcdsaP256Sha256, Self::P256(key)) => {
                 let signature: p256::ecdsa::Signature =
                     P256SigningKey::from(key.clone()).sign(message);
@@ -575,6 +833,21 @@ impl SoftwareSigningKey {
             (SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256, Self::K256(key)) => {
                 let signature: k256::ecdsa::Signature =
                     K256SigningKey::from(key.clone()).sign(message);
+                signature.to_bytes().to_vec()
+            }
+            (SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256, Self::BrainpoolP256(key)) => {
+                let signature: ecdsa::Signature<bp256::BrainpoolP256r1> =
+                    ecdsa::SigningKey::<bp256::BrainpoolP256r1>::from(key.clone()).sign(message);
+                signature.to_bytes().to_vec()
+            }
+            (SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384, Self::BrainpoolP384(key)) => {
+                let signature: ecdsa::Signature<bp384::BrainpoolP384r1> =
+                    ecdsa::SigningKey::<bp384::BrainpoolP384r1>::from(key.clone()).sign(message);
+                signature.to_bytes().to_vec()
+            }
+            (SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512, Self::BrainpoolP512(key)) => {
+                let signature: crate::brainpool512::Signature =
+                    ecdsa::SigningKey::<BrainpoolP512r1>::from(key.clone()).sign(message);
                 signature.to_bytes().to_vec()
             }
             (algorithm, Self::Rsa(key)) if algorithm.is_rsa() => {
@@ -610,6 +883,9 @@ impl SoftwareSigningKey {
             }};
         }
         let signature = match (algorithm, self) {
+            (SoftwareSigningAlgorithm::EcdsaP224Sha224, Self::P224(key)) => {
+                sign_ecdsa_prehash!(key, p224::ecdsa::SigningKey, p224::ecdsa::Signature)
+            }
             (SoftwareSigningAlgorithm::EcdsaP256Sha256, Self::P256(key)) => {
                 sign_ecdsa_prehash!(key, P256SigningKey, p256::ecdsa::Signature)
             }
@@ -621,6 +897,27 @@ impl SoftwareSigningKey {
             }
             (SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256, Self::K256(key)) => {
                 sign_ecdsa_prehash!(key, K256SigningKey, k256::ecdsa::Signature)
+            }
+            (SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256, Self::BrainpoolP256(key)) => {
+                sign_ecdsa_prehash!(
+                    key,
+                    ecdsa::SigningKey<bp256::BrainpoolP256r1>,
+                    ecdsa::Signature<bp256::BrainpoolP256r1>
+                )
+            }
+            (SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384, Self::BrainpoolP384(key)) => {
+                sign_ecdsa_prehash!(
+                    key,
+                    ecdsa::SigningKey<bp384::BrainpoolP384r1>,
+                    ecdsa::Signature<bp384::BrainpoolP384r1>
+                )
+            }
+            (SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512, Self::BrainpoolP512(key)) => {
+                sign_ecdsa_prehash!(
+                    key,
+                    ecdsa::SigningKey<BrainpoolP512r1>,
+                    crate::brainpool512::Signature
+                )
             }
             (algorithm, Self::Rsa(key)) if algorithm.is_rsa() => {
                 rsa_sign_prehash(algorithm, key, prehash, None)?
@@ -641,6 +938,84 @@ impl SoftwareSigningKey {
             return Err(SoftwareSigningError::AlgorithmMismatch);
         };
         rsa_sign_prehash(algorithm, key, prehash, Some(salt_length)).map(SoftwareSignature)
+    }
+
+    /// Sign caller-supplied PKCS #1 v1.5 payload bytes. The protocol layer may
+    /// pass either a DigestInfo value or another explicitly encoded payload.
+    pub fn sign_rsa_pkcs1v15_payload(
+        &self,
+        payload: &[u8],
+    ) -> Result<SoftwareSignature, SoftwareSigningError> {
+        let Self::Rsa(key) = self else {
+            return Err(SoftwareSigningError::AlgorithmMismatch);
+        };
+        rsa_sign_pkcs1v15_payload(key, payload)
+            .map(SoftwareSignature)
+            .map_err(map_rsa_signing_error)
+    }
+
+    /// Sign a digest after applying the selected PKCS #1 DigestInfo prefix.
+    pub fn sign_rsa_pkcs1v15_digest(
+        &self,
+        hash: RsaHashAlgorithm,
+        digest: &[u8],
+    ) -> Result<SoftwareSignature, SoftwareSigningError> {
+        let Self::Rsa(key) = self else {
+            return Err(SoftwareSigningError::AlgorithmMismatch);
+        };
+        rsa_sign_pkcs1v15_digest(key, hash, digest)
+            .map(SoftwareSignature)
+            .map_err(map_rsa_signing_error)
+    }
+
+    /// Sign a digest with independently selected message and MGF1 hashes.
+    pub fn sign_rsa_pss_digest(
+        &self,
+        hash: RsaHashAlgorithm,
+        mgf_hash: RsaHashAlgorithm,
+        salt_length: usize,
+        digest: &[u8],
+    ) -> Result<SoftwareSignature, SoftwareSigningError> {
+        let Self::Rsa(key) = self else {
+            return Err(SoftwareSigningError::AlgorithmMismatch);
+        };
+        rsa_sign_pss_digest(
+            key,
+            RsaPssParameters {
+                hash,
+                mgf_hash,
+                salt_length,
+            },
+            digest,
+        )
+        .map(SoftwareSignature)
+        .map_err(map_rsa_signing_error)
+    }
+
+    pub fn decrypt_rsa_pkcs1v15(
+        &self,
+        ciphertext: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, SoftwareSigningError> {
+        let Self::Rsa(key) = self else {
+            return Err(SoftwareSigningError::AlgorithmMismatch);
+        };
+        rsa_decrypt_pkcs1v15(key, ciphertext)
+            .map(Zeroizing::new)
+            .map_err(map_rsa_signing_error)
+    }
+
+    pub fn decrypt_rsa_oaep_digest(
+        &self,
+        ciphertext: &[u8],
+        label_digest: &[u8],
+        mgf_hash: RsaHashAlgorithm,
+    ) -> Result<Zeroizing<Vec<u8>>, SoftwareSigningError> {
+        let Self::Rsa(key) = self else {
+            return Err(SoftwareSigningError::AlgorithmMismatch);
+        };
+        rsa_decrypt_oaep_digest(key, ciphertext, label_digest, mgf_hash)
+            .map(Zeroizing::new)
+            .map_err(map_rsa_signing_error)
     }
 
     /// Perform the raw RSA private-key operation used by protocols that supply
@@ -733,6 +1108,16 @@ fn random_p256_secret() -> Result<P256SecretKey, SoftwareSigningError> {
     }
 }
 
+fn random_p224_secret() -> Result<P224SecretKey, SoftwareSigningError> {
+    loop {
+        let mut bytes = Zeroizing::new([0_u8; 28]);
+        getrandom::fill(bytes.as_mut()).map_err(|_| SoftwareSigningError::RandomnessUnavailable)?;
+        if let Ok(secret) = P224SecretKey::from_slice(bytes.as_ref()) {
+            return Ok(secret);
+        }
+    }
+}
+
 fn random_p384_secret() -> Result<P384SecretKey, SoftwareSigningError> {
     loop {
         let mut bytes = Zeroizing::new([0_u8; 48]);
@@ -763,6 +1148,36 @@ fn random_k256_secret() -> Result<K256SecretKey, SoftwareSigningError> {
     }
 }
 
+fn random_brainpool_p256_secret() -> Result<BrainpoolP256SecretKey, SoftwareSigningError> {
+    loop {
+        let mut bytes = Zeroizing::new([0_u8; 32]);
+        getrandom::fill(bytes.as_mut()).map_err(|_| SoftwareSigningError::RandomnessUnavailable)?;
+        if let Ok(secret) = BrainpoolP256SecretKey::from_slice(bytes.as_ref()) {
+            return Ok(secret);
+        }
+    }
+}
+
+fn random_brainpool_p384_secret() -> Result<BrainpoolP384SecretKey, SoftwareSigningError> {
+    loop {
+        let mut bytes = Zeroizing::new([0_u8; 48]);
+        getrandom::fill(bytes.as_mut()).map_err(|_| SoftwareSigningError::RandomnessUnavailable)?;
+        if let Ok(secret) = BrainpoolP384SecretKey::from_slice(bytes.as_ref()) {
+            return Ok(secret);
+        }
+    }
+}
+
+fn random_brainpool_p512_secret() -> Result<BrainpoolP512SecretKey, SoftwareSigningError> {
+    loop {
+        let mut bytes = Zeroizing::new([0_u8; 64]);
+        getrandom::fill(bytes.as_mut()).map_err(|_| SoftwareSigningError::RandomnessUnavailable)?;
+        if let Ok(secret) = BrainpoolP512SecretKey::from_slice(bytes.as_ref()) {
+            return Ok(secret);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -771,11 +1186,14 @@ mod tests {
     #[test]
     fn every_key_kind_round_trips_compact_private_material() {
         for algorithm in [
+            SoftwareSigningAlgorithm::EcdsaP224Sha224,
             SoftwareSigningAlgorithm::EcdsaP256Sha256,
             SoftwareSigningAlgorithm::Ed25519,
             SoftwareSigningAlgorithm::EcdsaP384Sha384,
             SoftwareSigningAlgorithm::EcdsaP521Sha512,
             SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256,
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384,
             SoftwareSigningAlgorithm::RsaPssSha256,
             SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa44),
             SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa65),
@@ -800,8 +1218,30 @@ mod tests {
     }
 
     #[test]
+    fn every_classical_asymmetric_key_round_trips_pkcs8() {
+        for algorithm in [
+            SoftwareSigningAlgorithm::EcdsaP224Sha224,
+            SoftwareSigningAlgorithm::EcdsaP256Sha256,
+            SoftwareSigningAlgorithm::Ed25519,
+            SoftwareSigningAlgorithm::EcdsaP384Sha384,
+            SoftwareSigningAlgorithm::EcdsaP521Sha512,
+            SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256,
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384,
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512,
+            SoftwareSigningAlgorithm::RsaPssSha256,
+        ] {
+            let key = SoftwareSigningKey::generate(algorithm).unwrap();
+            let encoded = key.to_pkcs8_der().unwrap();
+            let restored = SoftwareSigningKey::from_pkcs8_der(algorithm, &encoded).unwrap();
+            assert_eq!(restored.public_key(), key.public_key());
+        }
+    }
+
+    #[test]
     fn ecdsa_keys_sign_and_verify_caller_supplied_digests() {
         for (algorithm, prehash) in [
+            (SoftwareSigningAlgorithm::EcdsaP224Sha224, vec![0x22; 28]),
             (
                 SoftwareSigningAlgorithm::EcdsaP256Sha256,
                 Sha256::digest(b"prehashed signing test").to_vec(),
@@ -818,6 +1258,14 @@ mod tests {
                 SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
                 Sha256::digest(b"prehashed signing test").to_vec(),
             ),
+            (
+                SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256,
+                Sha256::digest(b"prehashed signing test").to_vec(),
+            ),
+            (
+                SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384,
+                Sha384::digest(b"prehashed signing test").to_vec(),
+            ),
         ] {
             let key = SoftwareSigningKey::generate(algorithm).unwrap();
             let public_key = key.public_key();
@@ -832,6 +1280,23 @@ mod tests {
                 Err(SoftwareSigningError::InvalidSignature)
             );
         }
+    }
+
+    #[test]
+    fn brainpool_p512_private_material_round_trips_and_signs_prehashes() {
+        let algorithm = SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512;
+        let key = SoftwareSigningKey::generate(algorithm).unwrap();
+        let serialized = key.serialized().unwrap();
+        let restored = SoftwareSigningKey::from_serialized(algorithm, &serialized).unwrap();
+        assert_eq!(restored.public_key(), key.public_key());
+        assert_eq!(
+            restored
+                .sign_prehash(algorithm, &[0x51; 64])
+                .unwrap()
+                .as_bytes()
+                .len(),
+            128
+        );
     }
 
     #[test]
@@ -900,5 +1365,28 @@ mod tests {
         public_key
             .verify_rsa_raw(&input, signature.as_bytes())
             .unwrap();
+    }
+
+    #[test]
+    fn rsa_pkcs1_and_oaep_encryption_round_trip() {
+        let key = SoftwareSigningKey::generate_rsa(1_024).unwrap();
+        let public = key.public_key();
+        let plaintext = b"encrypted protocol payload";
+        let ciphertext = public.encrypt_rsa_pkcs1v15(plaintext).unwrap();
+        assert_eq!(
+            key.decrypt_rsa_pkcs1v15(&ciphertext).unwrap().as_slice(),
+            plaintext
+        );
+
+        let label_digest = RsaHashAlgorithm::Sha256.digest(b"label");
+        let ciphertext = public
+            .encrypt_rsa_oaep_digest(plaintext, &label_digest, RsaHashAlgorithm::Sha384)
+            .unwrap();
+        assert_eq!(
+            key.decrypt_rsa_oaep_digest(&ciphertext, &label_digest, RsaHashAlgorithm::Sha384)
+                .unwrap()
+                .as_slice(),
+            plaintext
+        );
     }
 }
