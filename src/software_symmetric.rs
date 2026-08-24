@@ -9,6 +9,7 @@ use ccm::{
     consts::{U13, U16},
     Ccm,
 };
+use cmac::{Cmac, Mac};
 
 pub const AES_BLOCK_SIZE: usize = 16;
 
@@ -206,6 +207,47 @@ impl AesCipher {
     }
 }
 
+/// Calculate AES-CMAC with a 128, 192, or 256-bit AES key.
+pub fn aes_cmac(key: &[u8], data: &[u8]) -> Result<[u8; AES_BLOCK_SIZE], SoftwareSymmetricError> {
+    macro_rules! calculate {
+        ($cipher:ty) => {{
+            let mut mac = <Cmac<$cipher> as Mac>::new_from_slice(key)
+                .map_err(|_| SoftwareSymmetricError::InvalidKeyLength)?;
+            mac.update(data);
+            Ok(mac.finalize().into_bytes().into())
+        }};
+    }
+
+    match key.len() {
+        16 => calculate!(Aes128),
+        24 => calculate!(Aes192),
+        32 => calculate!(Aes256),
+        _ => Err(SoftwareSymmetricError::InvalidKeyLength),
+    }
+}
+
+/// Encrypt one AES block with a 128, 192, or 256-bit AES key.
+pub fn encrypt_aes_block(
+    key: &[u8],
+    input: &[u8; AES_BLOCK_SIZE],
+) -> Result<[u8; AES_BLOCK_SIZE], SoftwareSymmetricError> {
+    let cipher = AesCipher::new(key)?;
+    let mut block = GenericArray::from(*input);
+    cipher.encrypt_block(&mut block);
+    Ok(block.into())
+}
+
+/// Decrypt one AES block with a 128, 192, or 256-bit AES key.
+pub fn decrypt_aes_block(
+    key: &[u8],
+    input: &[u8; AES_BLOCK_SIZE],
+) -> Result<[u8; AES_BLOCK_SIZE], SoftwareSymmetricError> {
+    let cipher = AesCipher::new(key)?;
+    let mut block = GenericArray::from(*input);
+    cipher.decrypt_block(&mut block);
+    Ok(block.into())
+}
+
 pub fn encrypt_aes_ecb(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, SoftwareSymmetricError> {
     transform_ecb(key, plaintext, true)
 }
@@ -219,7 +261,7 @@ fn transform_ecb(
     input: &[u8],
     encrypt: bool,
 ) -> Result<Vec<u8>, SoftwareSymmetricError> {
-    if input.is_empty() || input.len() % AES_BLOCK_SIZE != 0 {
+    if input.len() % AES_BLOCK_SIZE != 0 {
         return Err(SoftwareSymmetricError::InvalidDataLength);
     }
     let cipher = AesCipher::new(key)?;
@@ -243,7 +285,7 @@ pub fn encrypt_aes_cbc(
     if iv.len() != AES_BLOCK_SIZE {
         return Err(SoftwareSymmetricError::InvalidIvLength);
     }
-    if plaintext.is_empty() || plaintext.len() % AES_BLOCK_SIZE != 0 {
+    if plaintext.len() % AES_BLOCK_SIZE != 0 {
         return Err(SoftwareSymmetricError::InvalidDataLength);
     }
     let cipher = AesCipher::new(key)?;
@@ -267,7 +309,7 @@ pub fn decrypt_aes_cbc(
     if iv.len() != AES_BLOCK_SIZE {
         return Err(SoftwareSymmetricError::InvalidIvLength);
     }
-    if ciphertext.is_empty() || ciphertext.len() % AES_BLOCK_SIZE != 0 {
+    if ciphertext.len() % AES_BLOCK_SIZE != 0 {
         return Err(SoftwareSymmetricError::InvalidDataLength);
     }
     let cipher = AesCipher::new(key)?;
@@ -309,7 +351,21 @@ mod tests {
             let ciphertext = encrypt_aes_ecb(&key, &plaintext).unwrap();
             assert_eq!(ciphertext, hex(expected));
             assert_eq!(decrypt_aes_ecb(&key, &ciphertext).unwrap(), plaintext);
+            let block: [u8; AES_BLOCK_SIZE] = plaintext.as_slice().try_into().unwrap();
+            let encrypted = encrypt_aes_block(&key, &block).unwrap();
+            assert_eq!(encrypted.as_slice(), hex(expected));
+            assert_eq!(decrypt_aes_block(&key, &encrypted).unwrap(), block);
         }
+    }
+
+    #[test]
+    fn aes_cmac_matches_nist_sp_800_38b() {
+        let key = hex("2b7e151628aed2a6abf7158809cf4f3c");
+        let message = hex("6bc1bee22e409f96e93d7e117393172a");
+        assert_eq!(
+            aes_cmac(&key, &message).unwrap().as_slice(),
+            hex("070a16b46b4d4144f79bdd9dd04a287c")
+        );
     }
 
     #[test]

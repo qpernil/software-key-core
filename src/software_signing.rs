@@ -8,7 +8,7 @@
 
 use crate::{
     brainpool512::{BrainpoolP512r1, SecretKey as BrainpoolP512SecretKey},
-    post_quantum::{verify_ml_dsa, MlDsaParameterSet, MlDsaPrivateKey},
+    post_quantum::{validate_ml_dsa_public_key, verify_ml_dsa, MlDsaParameterSet, MlDsaPrivateKey},
     rsa_signing::{
         rsa_decrypt_oaep_digest, rsa_decrypt_pkcs1v15, rsa_encrypt_oaep_digest,
         rsa_encrypt_pkcs1v15, rsa_sign_pkcs1v15_digest, rsa_sign_pkcs1v15_payload,
@@ -160,6 +160,44 @@ macro_rules! verify_generic_ecdsa_prehash {
 }
 
 impl SoftwarePublicKey {
+    /// Validate that the encoded public key is structurally valid and belongs
+    /// to the declared algorithm family.
+    pub fn validate(&self) -> Result<(), SoftwareSigningError> {
+        match self {
+            Self::Ec {
+                curve,
+                uncompressed,
+            } => {
+                macro_rules! validate_ec {
+                    ($curve:ty) => {
+                        ecdsa::VerifyingKey::<$curve>::from_sec1_bytes(uncompressed)
+                            .map(|_| ())
+                            .map_err(|_| SoftwareSigningError::InvalidPublicKey)
+                    };
+                }
+                match curve {
+                    EcCurve::P224 => validate_ec!(p224::NistP224),
+                    EcCurve::P256 => validate_ec!(p256::NistP256),
+                    EcCurve::P384 => validate_ec!(p384::NistP384),
+                    EcCurve::P521 => validate_ec!(p521::NistP521),
+                    EcCurve::Secp256k1 => validate_ec!(k256::Secp256k1),
+                    EcCurve::BrainpoolP256 => validate_ec!(bp256::BrainpoolP256r1),
+                    EcCurve::BrainpoolP384 => validate_ec!(bp384::BrainpoolP384r1),
+                    EcCurve::BrainpoolP512 => validate_ec!(BrainpoolP512r1),
+                }
+            }
+            Self::Ed25519(public) => ed25519_dalek::VerifyingKey::from_bytes(public)
+                .map(|_| ())
+                .map_err(|_| SoftwareSigningError::InvalidPublicKey),
+            Self::MlDsa {
+                parameter_set,
+                public_key,
+            } => validate_ml_dsa_public_key(*parameter_set, public_key)
+                .map_err(|_| SoftwareSigningError::InvalidPublicKey),
+            Self::Rsa { modulus, exponent } => rsa_public_key(modulus, exponent).map(|_| ()),
+        }
+    }
+
     pub fn encrypt_rsa_pkcs1v15(&self, plaintext: &[u8]) -> Result<Vec<u8>, SoftwareSigningError> {
         let Self::Rsa { modulus, exponent } = self else {
             return Err(SoftwareSigningError::AlgorithmMismatch);
@@ -261,6 +299,21 @@ impl SoftwarePublicKey {
                     uncompressed,
                 },
             ) => verify_generic_ecdsa!(bp384::BrainpoolP384r1, uncompressed, message, signature),
+            (
+                SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512,
+                Self::Ec {
+                    curve: EcCurve::BrainpoolP512,
+                    uncompressed,
+                },
+            ) => {
+                use sha2::Digest as _;
+                crate::brainpool512::verify_prehash(
+                    uncompressed,
+                    &sha2::Sha512::digest(message),
+                    signature,
+                )
+                .map_err(|_| SoftwareSigningError::InvalidSignature)
+            }
             (SoftwareSigningAlgorithm::Ed25519, Self::Ed25519(public)) => {
                 let key = ed25519_dalek::VerifyingKey::from_bytes(public)
                     .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
@@ -369,6 +422,14 @@ impl SoftwarePublicKey {
                 prehash,
                 signature
             ),
+            (
+                SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512,
+                Self::Ec {
+                    curve: EcCurve::BrainpoolP512,
+                    uncompressed,
+                },
+            ) => crate::brainpool512::verify_prehash(uncompressed, prehash, signature)
+                .map_err(|_| SoftwareSigningError::InvalidSignature),
             (
                 algorithm @ (SoftwareSigningAlgorithm::RsaPssSha256
                 | SoftwareSigningAlgorithm::RsaPssSha384
@@ -500,6 +561,14 @@ pub enum SoftwareSigningKey {
     MlDsa(MlDsaPrivateKey),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SoftwareSigningKeyKind {
+    Ec(EcCurve),
+    Ed25519,
+    Rsa,
+    MlDsa(MlDsaParameterSet),
+}
+
 impl fmt::Debug for SoftwareSigningKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -510,6 +579,63 @@ impl fmt::Debug for SoftwareSigningKey {
 }
 
 impl SoftwareSigningKey {
+    pub fn kind(&self) -> SoftwareSigningKeyKind {
+        match self {
+            Self::P224(_) => SoftwareSigningKeyKind::Ec(EcCurve::P224),
+            Self::P256(_) => SoftwareSigningKeyKind::Ec(EcCurve::P256),
+            Self::Ed25519(_) => SoftwareSigningKeyKind::Ed25519,
+            Self::P384(_) => SoftwareSigningKeyKind::Ec(EcCurve::P384),
+            Self::P521(_) => SoftwareSigningKeyKind::Ec(EcCurve::P521),
+            Self::K256(_) => SoftwareSigningKeyKind::Ec(EcCurve::Secp256k1),
+            Self::BrainpoolP256(_) => SoftwareSigningKeyKind::Ec(EcCurve::BrainpoolP256),
+            Self::BrainpoolP384(_) => SoftwareSigningKeyKind::Ec(EcCurve::BrainpoolP384),
+            Self::BrainpoolP512(_) => SoftwareSigningKeyKind::Ec(EcCurve::BrainpoolP512),
+            Self::Rsa(_) => SoftwareSigningKeyKind::Rsa,
+            Self::MlDsa(key) => SoftwareSigningKeyKind::MlDsa(key.parameter_set()),
+        }
+    }
+
+    /// Raw private value used by token APIs. RSA private components have
+    /// dedicated accessors and are intentionally not returned here.
+    pub fn private_value(&self) -> Option<Zeroizing<Vec<u8>>> {
+        match self {
+            Self::Rsa(_) => None,
+            Self::MlDsa(key) => Some(key.expanded_private_key()),
+            _ => self.serialized().ok(),
+        }
+    }
+
+    pub fn rsa_size(&self) -> Result<usize, SoftwareSigningError> {
+        let Self::Rsa(key) = self else {
+            return Err(SoftwareSigningError::AlgorithmMismatch);
+        };
+        Ok(key.size())
+    }
+
+    /// Export `d, p, q, dP, dQ, qInv` as unsigned big-endian integers.
+    pub fn rsa_private_components(&self) -> Result<[Zeroizing<Vec<u8>>; 6], SoftwareSigningError> {
+        let Self::Rsa(key) = self else {
+            return Err(SoftwareSigningError::AlgorithmMismatch);
+        };
+        let [p, q] = key.primes() else {
+            return Err(SoftwareSigningError::InvalidPrivateKey);
+        };
+        let dp = key.dp().ok_or(SoftwareSigningError::InvalidPrivateKey)?;
+        let dq = key.dq().ok_or(SoftwareSigningError::InvalidPrivateKey)?;
+        let qinv = key
+            .qinv()
+            .and_then(|value| value.to_biguint())
+            .ok_or(SoftwareSigningError::InvalidPrivateKey)?;
+        Ok([
+            Zeroizing::new(key.d().to_bytes_be()),
+            Zeroizing::new(p.to_bytes_be()),
+            Zeroizing::new(q.to_bytes_be()),
+            Zeroizing::new(dp.to_bytes_be()),
+            Zeroizing::new(dq.to_bytes_be()),
+            Zeroizing::new(qinv.to_bytes_be()),
+        ])
+    }
+
     /// Import the PKCS#8 `PrivateKeyInfo` representation used by YubiHSM's
     /// RSA-wrapped asymmetric-key commands.
     pub fn from_pkcs8_der(
@@ -556,8 +682,10 @@ impl SoftwareSigningKey {
                     .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
                 return Ok(Self::Rsa(Box::new(key)));
             }
-            SoftwareSigningAlgorithm::MlDsa(_) => {
-                return Err(SoftwareSigningError::AlgorithmMismatch);
+            SoftwareSigningAlgorithm::MlDsa(parameter_set) => {
+                return MlDsaPrivateKey::from_pkcs8_der(parameter_set, serialized)
+                    .map(Self::MlDsa)
+                    .map_err(|_| SoftwareSigningError::InvalidPrivateKey);
             }
         }
         .map_err(|_| SoftwareSigningError::InvalidPrivateKey)
@@ -582,7 +710,11 @@ impl SoftwareSigningKey {
                     .map(|value| Zeroizing::new(value.as_bytes().to_vec()))
                     .map_err(|_| SoftwareSigningError::InvalidPrivateKey);
             }
-            Self::MlDsa(_) => return Err(SoftwareSigningError::AlgorithmMismatch),
+            Self::MlDsa(key) => {
+                return key
+                    .to_pkcs8_der()
+                    .map_err(|_| SoftwareSigningError::InvalidPrivateKey)
+            }
         }
         .map(|value| Zeroizing::new(value.as_bytes().to_vec()))
         .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
@@ -1266,6 +1398,10 @@ mod tests {
                 SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384,
                 Sha384::digest(b"prehashed signing test").to_vec(),
             ),
+            (
+                SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512,
+                Sha512::digest(b"prehashed signing test").to_vec(),
+            ),
         ] {
             let key = SoftwareSigningKey::generate(algorithm).unwrap();
             let public_key = key.public_key();
@@ -1289,14 +1425,13 @@ mod tests {
         let serialized = key.serialized().unwrap();
         let restored = SoftwareSigningKey::from_serialized(algorithm, &serialized).unwrap();
         assert_eq!(restored.public_key(), key.public_key());
-        assert_eq!(
-            restored
-                .sign_prehash(algorithm, &[0x51; 64])
-                .unwrap()
-                .as_bytes()
-                .len(),
-            128
-        );
+        let digest = [0x51; 64];
+        let signature = restored.sign_prehash(algorithm, &digest).unwrap();
+        assert_eq!(signature.as_bytes().len(), 128);
+        restored
+            .public_key()
+            .verify_prehash(algorithm, &digest, signature.as_bytes())
+            .unwrap();
     }
 
     #[test]

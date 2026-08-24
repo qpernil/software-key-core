@@ -74,6 +74,36 @@ impl fmt::Debug for MlDsaPrivateKey {
 }
 
 impl MlDsaPrivateKey {
+    pub fn from_pkcs8_der(
+        parameter_set: MlDsaParameterSet,
+        encoded: &[u8],
+    ) -> Result<Self, MlDsaError> {
+        use ::ml_dsa::pkcs8::DecodePrivateKey;
+        match parameter_set {
+            MlDsaParameterSet::MlDsa44 => {
+                SigningKey::<MlDsa44>::from_pkcs8_der(encoded).map(Self::MlDsa44)
+            }
+            MlDsaParameterSet::MlDsa65 => {
+                SigningKey::<MlDsa65>::from_pkcs8_der(encoded).map(Self::MlDsa65)
+            }
+            MlDsaParameterSet::MlDsa87 => {
+                SigningKey::<MlDsa87>::from_pkcs8_der(encoded).map(Self::MlDsa87)
+            }
+        }
+        .map_err(|_| MlDsaError::InvalidSeedLength)
+    }
+
+    pub fn to_pkcs8_der(&self) -> Result<Zeroizing<Vec<u8>>, MlDsaError> {
+        use ::ml_dsa::pkcs8::EncodePrivateKey;
+        let document = match self {
+            Self::MlDsa44(key) => key.to_pkcs8_der(),
+            Self::MlDsa65(key) => key.to_pkcs8_der(),
+            Self::MlDsa87(key) => key.to_pkcs8_der(),
+        }
+        .map_err(|_| MlDsaError::InvalidSeedLength)?;
+        Ok(Zeroizing::new(document.as_bytes().to_vec()))
+    }
+
     pub fn generate(parameter_set: MlDsaParameterSet) -> Result<Self, MlDsaError> {
         let mut seed = Zeroizing::new([0_u8; 32]);
         getrandom::fill(seed.as_mut()).map_err(|_| MlDsaError::RandomnessUnavailable)?;
@@ -112,6 +142,16 @@ impl MlDsaPrivateKey {
             Self::MlDsa87(key) => key.as_seed(),
         };
         Zeroizing::new((*bytes).into())
+    }
+
+    /// Expanded FIPS 204 private-key encoding used by PKCS #11 `CKA_VALUE`.
+    #[allow(deprecated)]
+    pub fn expanded_private_key(&self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(match self {
+            Self::MlDsa44(key) => key.expanded_key().to_expanded().to_vec(),
+            Self::MlDsa65(key) => key.expanded_key().to_expanded().to_vec(),
+            Self::MlDsa87(key) => key.expanded_key().to_expanded().to_vec(),
+        })
     }
 
     pub fn public_key(&self) -> Vec<u8> {
@@ -199,6 +239,48 @@ pub fn verify_ml_dsa(
         MlDsaParameterSet::MlDsa44 => verify!(MlDsa44),
         MlDsaParameterSet::MlDsa65 => verify!(MlDsa65),
         MlDsaParameterSet::MlDsa87 => verify!(MlDsa87),
+    }
+}
+
+pub fn validate_ml_dsa_public_key(
+    parameter_set: MlDsaParameterSet,
+    public_key: &[u8],
+) -> Result<(), MlDsaError> {
+    macro_rules! validate {
+        ($params:ty) => {{
+            let encoded = EncodedVerifyingKey::<$params>::try_from(public_key)
+                .map_err(|_| MlDsaError::InvalidPublicKey)?;
+            let _ = ::ml_dsa::VerifyingKey::<$params>::decode(&encoded);
+            Ok(())
+        }};
+    }
+    match parameter_set {
+        MlDsaParameterSet::MlDsa44 => validate!(MlDsa44),
+        MlDsaParameterSet::MlDsa65 => validate!(MlDsa65),
+        MlDsaParameterSet::MlDsa87 => validate!(MlDsa87),
+    }
+}
+
+/// Encode a raw ML-DSA verification key as SubjectPublicKeyInfo DER.
+pub fn ml_dsa_public_key_info(
+    parameter_set: MlDsaParameterSet,
+    public_key: &[u8],
+) -> Result<Vec<u8>, MlDsaError> {
+    macro_rules! encode {
+        ($params:ty) => {{
+            use ::ml_dsa::pkcs8::EncodePublicKey;
+            let encoded = EncodedVerifyingKey::<$params>::try_from(public_key)
+                .map_err(|_| MlDsaError::InvalidPublicKey)?;
+            ::ml_dsa::VerifyingKey::<$params>::decode(&encoded)
+                .to_public_key_der()
+                .map(|document| document.as_bytes().to_vec())
+                .map_err(|_| MlDsaError::InvalidPublicKey)
+        }};
+    }
+    match parameter_set {
+        MlDsaParameterSet::MlDsa44 => encode!(MlDsa44),
+        MlDsaParameterSet::MlDsa65 => encode!(MlDsa65),
+        MlDsaParameterSet::MlDsa87 => encode!(MlDsa87),
     }
 }
 
