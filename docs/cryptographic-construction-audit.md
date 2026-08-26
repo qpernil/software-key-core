@@ -53,10 +53,17 @@ These responsibilities were already in `software-key-core` before this audit:
 - Yubico password derivation; and
 - ML-KEM and ML-DSA key operations and serialization.
 
-`virtual-yubihsm` already delegates its software cryptography to these APIs.
-`virtual-yubikey` does the same for signing, symmetric operations, ML-DSA and
-ARKG. Their remaining direct cryptographic calls are mostly protocol
-composition and encoding.
+All supported ECDSA curves, Ed25519 signing and verification, X25519, and
+Weierstrass ECDH now cross the same shared key boundary. Static and ephemeral
+P-256 agreement use the same `SoftwareSigningKey` and
+`derive_with_signing_key` operations; key lifetime is a caller policy rather
+than a separate cryptographic implementation.
+
+`virtual-yubihsm` delegates device-static and ephemeral agreement, object ECDH,
+X25519, object signing, and attestation-certificate signatures to these APIs.
+`virtual-yubikey` does the same for CTAP agreement and all credential signing.
+`pkcs11rs` delegates CTAP, SCP11 and YubiHSM agreement, public-point validation,
+ECDSA/Ed25519 verification, and derived P-256 authentication keys.
 
 ## Completed migrations
 
@@ -75,23 +82,24 @@ encodings.
 
 ## Remaining consumer cryptographic dependencies
 
-The remaining direct dependencies have protocol or key-representation work
-which cannot be replaced by a construction callback:
+The remaining production cryptographic dependencies have non-duplicated key
+representation or protocol work:
 
 | Consumer | Dependency class | Retained responsibility |
 | --- | --- | --- |
-| `pkcs11rs` | `p256`, `elliptic-curve`, `rsa` | Hardware public-key parsing, raw public operations, certificate and ECDH protocol values |
+| `pkcs11rs` | `rsa` | PKCS #11/YubiHSM RSA key representation and raw public operations |
 | `pkcs11rs` | `getrandom`, `subtle` | Protocol challenges, generated object material and constant-time protocol comparisons |
-| `pkcs11rs-tool` | `p256` | Certificate/public-key authoring and validation |
-| `virtual-yubihsm` | `p256`, `rsa` | YubiHSM asymmetric-authentication ECDH, attestation and wire-format public keys |
+| `pkcs11rs-tool` | none of the curve crates | Certificate containers are parsed locally; curve keys are validated by the shared API |
+| `virtual-yubihsm` | `rsa`, `signature` | RSA wire-key representation and an X.509 builder adapter which calls shared signing |
 | `virtual-yubihsm` | `getrandom`, `subtle` | Device challenges, nonces and secure-session comparisons |
-| `virtual-yubikey` | `p256` | CTAP PIN-protocol ECDH and public-point encoding |
 | `virtual-yubikey` | `getrandom`, `subtle` | Credential identifiers, protocol nonces and PIN/authentication comparisons |
 
-The additional curve crates in `virtual-yubikey` are now test-only: production
-ECDSA DER formatting is supplied by `software-key-core`. No consumer retains a
-direct AES, Triple-DES, CCM, CMAC, GHASH, HMAC, HKDF, PBKDF2, SHA-1, SHA-2,
-SHA-3 or ML-KEM dependency.
+Curve and Ed25519 crates in consumers are test-only, except that `pkcs11rs`
+keeps P-256 as an optional ABI-test fixture dependency. Those tests provide an
+independent implementation against which the shared code is checked. No
+consumer retains a default production dependency on a curve implementation,
+or a direct AES, Triple-DES, CCM, CMAC, GHASH, HMAC, HKDF, PBKDF2, SHA-1,
+SHA-2, SHA-3 or ML-KEM dependency.
 
 ## Constructions which should remain protocol-specific
 

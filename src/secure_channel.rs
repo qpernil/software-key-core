@@ -129,14 +129,17 @@ pub fn yubico_password_kdf(password: &[u8]) -> Zeroizing<[u8; 32]> {
 /// asymmetric password enrollment convention.
 pub fn yubico_password_p256_key(
     password: &[u8],
-) -> Result<p256::SecretKey, SecureChannelCryptoError> {
+) -> Result<crate::software_signing::SoftwareSigningKey, SecureChannelCryptoError> {
     let mut input = Zeroizing::new(Vec::with_capacity(password.len() + 1));
     input.extend_from_slice(password);
     input.push(0);
     for counter in 0..=u8::MAX {
         *input.last_mut().unwrap() = counter;
         let private = yubico_password_kdf(&input);
-        if let Ok(key) = p256::SecretKey::from_slice(private.as_slice()) {
+        if let Ok(key) = crate::software_signing::SoftwareSigningKey::from_serialized(
+            crate::software_signing::SoftwareSigningAlgorithm::EcdsaP256Sha256,
+            private.as_slice(),
+        ) {
             return Ok(key);
         }
     }
@@ -172,7 +175,8 @@ mod tests {
         assert_eq!(
             yubico_password_p256_key(b"password")
                 .unwrap()
-                .to_bytes()
+                .serialized()
+                .unwrap()
                 .as_slice(),
             yubico_password_kdf(b"password").as_slice()
         );
