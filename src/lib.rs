@@ -8,6 +8,7 @@
 
 pub mod arkg;
 pub mod brainpool512;
+pub mod digest;
 pub mod post_quantum;
 pub mod rsa_signing;
 pub mod secure_channel;

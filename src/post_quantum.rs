@@ -9,6 +9,254 @@ use signature::Keypair;
 use std::fmt;
 use zeroize::Zeroizing;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MlKemParameterSet {
+    MlKem512,
+    MlKem768,
+    MlKem1024,
+}
+
+impl MlKemParameterSet {
+    pub const fn public_key_length(self) -> usize {
+        match self {
+            Self::MlKem512 => 800,
+            Self::MlKem768 => 1_184,
+            Self::MlKem1024 => 1_568,
+        }
+    }
+
+    pub const fn expanded_private_key_length(self) -> usize {
+        match self {
+            Self::MlKem512 => 1_632,
+            Self::MlKem768 => 2_400,
+            Self::MlKem1024 => 3_168,
+        }
+    }
+
+    pub const fn ciphertext_length(self) -> usize {
+        match self {
+            Self::MlKem512 => 768,
+            Self::MlKem768 => 1_088,
+            Self::MlKem1024 => 1_568,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MlKemError {
+    InvalidSeedLength,
+    InvalidExpandedPrivateKey,
+    InvalidPublicKey,
+    InvalidCiphertext,
+    InvalidPrivateKey,
+    RandomnessUnavailable,
+    EncodingFailed,
+}
+
+#[derive(Clone)]
+pub enum MlKemPrivateKey {
+    MlKem512(::ml_kem::DecapsulationKey<::ml_kem::MlKem512>),
+    MlKem768(::ml_kem::DecapsulationKey<::ml_kem::MlKem768>),
+    MlKem1024(::ml_kem::DecapsulationKey<::ml_kem::MlKem1024>),
+}
+
+impl fmt::Debug for MlKemPrivateKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MlKemPrivateKey")
+            .field("parameter_set", &self.parameter_set())
+            .finish_non_exhaustive()
+    }
+}
+
+impl MlKemPrivateKey {
+    pub fn generate(parameter_set: MlKemParameterSet) -> Result<Self, MlKemError> {
+        let mut seed = Zeroizing::new([0u8; 64]);
+        getrandom::fill(seed.as_mut()).map_err(|_| MlKemError::RandomnessUnavailable)?;
+        Ok(Self::from_seed(parameter_set, *seed))
+    }
+
+    pub fn from_seed(parameter_set: MlKemParameterSet, seed: [u8; 64]) -> Self {
+        let seed = ::ml_kem::Seed::from(seed);
+        match parameter_set {
+            MlKemParameterSet::MlKem512 => {
+                Self::MlKem512(::ml_kem::DecapsulationKey::from_seed(seed))
+            }
+            MlKemParameterSet::MlKem768 => {
+                Self::MlKem768(::ml_kem::DecapsulationKey::from_seed(seed))
+            }
+            MlKemParameterSet::MlKem1024 => {
+                Self::MlKem1024(::ml_kem::DecapsulationKey::from_seed(seed))
+            }
+        }
+    }
+
+    pub fn from_seed_slice(
+        parameter_set: MlKemParameterSet,
+        seed: &[u8],
+    ) -> Result<Self, MlKemError> {
+        Ok(Self::from_seed(
+            parameter_set,
+            seed.try_into().map_err(|_| MlKemError::InvalidSeedLength)?,
+        ))
+    }
+
+    #[allow(deprecated)]
+    pub fn from_expanded_private_key(
+        parameter_set: MlKemParameterSet,
+        expanded: &[u8],
+    ) -> Result<Self, MlKemError> {
+        macro_rules! decode {
+            ($params:ty, $variant:ident) => {{
+                let expanded = ::ml_kem::ExpandedDecapsulationKey::<$params>::try_from(expanded)
+                    .map_err(|_| MlKemError::InvalidExpandedPrivateKey)?;
+                ::ml_kem::ExpandedKeyEncoding::from_expanded_bytes(&expanded)
+                    .map(Self::$variant)
+                    .map_err(|_| MlKemError::InvalidExpandedPrivateKey)
+            }};
+        }
+        match parameter_set {
+            MlKemParameterSet::MlKem512 => decode!(::ml_kem::MlKem512, MlKem512),
+            MlKemParameterSet::MlKem768 => decode!(::ml_kem::MlKem768, MlKem768),
+            MlKemParameterSet::MlKem1024 => decode!(::ml_kem::MlKem1024, MlKem1024),
+        }
+    }
+
+    pub fn from_pkcs8_der(
+        parameter_set: MlKemParameterSet,
+        encoded: &[u8],
+    ) -> Result<Self, MlKemError> {
+        use ::ml_kem::pkcs8::DecodePrivateKey;
+        match parameter_set {
+            MlKemParameterSet::MlKem512 => {
+                ::ml_kem::DecapsulationKey::<::ml_kem::MlKem512>::from_pkcs8_der(encoded)
+                    .map(Self::MlKem512)
+            }
+            MlKemParameterSet::MlKem768 => {
+                ::ml_kem::DecapsulationKey::<::ml_kem::MlKem768>::from_pkcs8_der(encoded)
+                    .map(Self::MlKem768)
+            }
+            MlKemParameterSet::MlKem1024 => {
+                ::ml_kem::DecapsulationKey::<::ml_kem::MlKem1024>::from_pkcs8_der(encoded)
+                    .map(Self::MlKem1024)
+            }
+        }
+        .map_err(|_| MlKemError::InvalidPrivateKey)
+    }
+
+    pub fn to_pkcs8_der(&self) -> Result<Zeroizing<Vec<u8>>, MlKemError> {
+        use ::ml_kem::pkcs8::EncodePrivateKey;
+        let document = match self {
+            Self::MlKem512(key) => key.to_pkcs8_der(),
+            Self::MlKem768(key) => key.to_pkcs8_der(),
+            Self::MlKem1024(key) => key.to_pkcs8_der(),
+        }
+        .map_err(|_| MlKemError::EncodingFailed)?;
+        Ok(Zeroizing::new(document.as_bytes().to_vec()))
+    }
+
+    pub const fn parameter_set(&self) -> MlKemParameterSet {
+        match self {
+            Self::MlKem512(_) => MlKemParameterSet::MlKem512,
+            Self::MlKem768(_) => MlKemParameterSet::MlKem768,
+            Self::MlKem1024(_) => MlKemParameterSet::MlKem1024,
+        }
+    }
+
+    pub fn seed(&self) -> Option<Zeroizing<Vec<u8>>> {
+        match self {
+            Self::MlKem512(key) => key.to_seed(),
+            Self::MlKem768(key) => key.to_seed(),
+            Self::MlKem1024(key) => key.to_seed(),
+        }
+        .map(|seed| Zeroizing::new(seed.to_vec()))
+    }
+
+    #[allow(deprecated)]
+    pub fn expanded_private_key(&self) -> Zeroizing<Vec<u8>> {
+        use ::ml_kem::ExpandedKeyEncoding;
+        Zeroizing::new(match self {
+            Self::MlKem512(key) => key.to_expanded_bytes().to_vec(),
+            Self::MlKem768(key) => key.to_expanded_bytes().to_vec(),
+            Self::MlKem1024(key) => key.to_expanded_bytes().to_vec(),
+        })
+    }
+
+    pub fn public_key(&self) -> Vec<u8> {
+        use ::ml_kem::kem::KeyExport;
+        match self {
+            Self::MlKem512(key) => key.encapsulation_key().to_bytes().to_vec(),
+            Self::MlKem768(key) => key.encapsulation_key().to_bytes().to_vec(),
+            Self::MlKem1024(key) => key.encapsulation_key().to_bytes().to_vec(),
+        }
+    }
+
+    pub fn decapsulate(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, MlKemError> {
+        use ::ml_kem::kem::Decapsulate;
+        macro_rules! decapsulate {
+            ($key:expr, $params:ty) => {{
+                let ciphertext = ::ml_kem::kem::Ciphertext::<$params>::try_from(ciphertext)
+                    .map_err(|_| MlKemError::InvalidCiphertext)?;
+                Ok(Zeroizing::new($key.decapsulate(&ciphertext).to_vec()))
+            }};
+        }
+        match self {
+            Self::MlKem512(key) => decapsulate!(key, ::ml_kem::MlKem512),
+            Self::MlKem768(key) => decapsulate!(key, ::ml_kem::MlKem768),
+            Self::MlKem1024(key) => decapsulate!(key, ::ml_kem::MlKem1024),
+        }
+    }
+}
+
+pub fn ml_kem_encapsulate(
+    parameter_set: MlKemParameterSet,
+    public_key: &[u8],
+) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), MlKemError> {
+    let mut randomness = Zeroizing::new([0u8; 32]);
+    getrandom::fill(randomness.as_mut()).map_err(|_| MlKemError::RandomnessUnavailable)?;
+    macro_rules! encapsulate {
+        ($params:ty) => {{
+            let encoded =
+                ::ml_kem::kem::Key::<::ml_kem::EncapsulationKey<$params>>::try_from(public_key)
+                    .map_err(|_| MlKemError::InvalidPublicKey)?;
+            let key = ::ml_kem::EncapsulationKey::<$params>::new(&encoded)
+                .map_err(|_| MlKemError::InvalidPublicKey)?;
+            let (ciphertext, shared) =
+                key.encapsulate_deterministic(&::ml_kem::B32::from(*randomness));
+            Ok((ciphertext.to_vec(), Zeroizing::new(shared.to_vec())))
+        }};
+    }
+    match parameter_set {
+        MlKemParameterSet::MlKem512 => encapsulate!(::ml_kem::MlKem512),
+        MlKemParameterSet::MlKem768 => encapsulate!(::ml_kem::MlKem768),
+        MlKemParameterSet::MlKem1024 => encapsulate!(::ml_kem::MlKem1024),
+    }
+}
+
+pub fn ml_kem_public_key_info(
+    parameter_set: MlKemParameterSet,
+    public_key: &[u8],
+) -> Result<Vec<u8>, MlKemError> {
+    macro_rules! encode {
+        ($params:ty) => {{
+            use ::ml_kem::pkcs8::EncodePublicKey;
+            let encoded =
+                ::ml_kem::kem::Key::<::ml_kem::EncapsulationKey<$params>>::try_from(public_key)
+                    .map_err(|_| MlKemError::InvalidPublicKey)?;
+            ::ml_kem::EncapsulationKey::<$params>::new(&encoded)
+                .map_err(|_| MlKemError::InvalidPublicKey)?
+                .to_public_key_der()
+                .map(|document| document.as_bytes().to_vec())
+                .map_err(|_| MlKemError::EncodingFailed)
+        }};
+    }
+    match parameter_set {
+        MlKemParameterSet::MlKem512 => encode!(::ml_kem::MlKem512),
+        MlKemParameterSet::MlKem768 => encode!(::ml_kem::MlKem768),
+        MlKemParameterSet::MlKem1024 => encode!(::ml_kem::MlKem1024),
+    }
+}
+
 /// One of the three FIPS 204 ML-DSA parameter sets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MlDsaParameterSet {
@@ -288,6 +536,34 @@ pub fn ml_dsa_public_key_info(
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn every_ml_kem_parameter_set_round_trips_all_key_encodings() {
+        for parameter_set in [
+            MlKemParameterSet::MlKem512,
+            MlKemParameterSet::MlKem768,
+            MlKemParameterSet::MlKem1024,
+        ] {
+            let key = MlKemPrivateKey::from_seed(parameter_set, [7; 64]);
+            assert_eq!(key.seed().unwrap().as_slice(), &[7; 64]);
+            assert_eq!(key.public_key().len(), parameter_set.public_key_length());
+            assert_eq!(
+                key.expanded_private_key().len(),
+                parameter_set.expanded_private_key_length()
+            );
+            let (ciphertext, encapsulated) =
+                ml_kem_encapsulate(parameter_set, &key.public_key()).unwrap();
+            assert_eq!(ciphertext.len(), parameter_set.ciphertext_length());
+            assert_eq!(key.decapsulate(&ciphertext).unwrap(), encapsulated);
+
+            let encoded = key.to_pkcs8_der().unwrap();
+            let restored = MlKemPrivateKey::from_pkcs8_der(parameter_set, &encoded).unwrap();
+            assert_eq!(restored.public_key(), key.public_key());
+            assert!(!ml_kem_public_key_info(parameter_set, &key.public_key())
+                .unwrap()
+                .is_empty());
+        }
+    }
 
     #[test]
     fn ml_dsa_44_key_generation_matches_nist_acvp_fips_204() {

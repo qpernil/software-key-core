@@ -5,13 +5,21 @@ security-token providers and device emulators.
 
 The crate owns reusable RSA, elliptic-curve, Ed25519 and X25519 key generation,
 public-key projection, signing, verification and raw key agreement. Its
-symmetric primitives cover AES ECB/CBC/CTR, CCM with both general and Yubico
-OTP profiles, GCM/GMAC, AES-CMAC, and AES key wrap with padding. GCM, general
-CCM, CTR and CMAC also have callback-based forms which operate over a caller's
-AES block capability, allowing one construction to serve raw software keys and
-hardware-held keys. It also owns the reusable SCP03-style KDF, cryptogram and
-padding operations, X9.63 and Yubico password KDFs, and both sides of the
-ARKG-P256 public/private derivation. Supported Weierstrass curves include
+symmetric adapters cover AES and Triple-DES, while its construction APIs cover
+CBC, CTR, CMAC, CCM, GCM/GMAC, PKCS #7 padding, RFC 3394 key wrap and RFC 5649
+key wrap with padding. The construction APIs operate over caller-supplied block
+capabilities, allowing the same implementation to serve software keys and
+hardware-held keys. AES-specific names are reserved for convenience APIs which
+actually accept AES key bytes.
+
+Digest support is similarly centralized: SHA-1, SHA-2 and SHA-3 hashing,
+streaming hash contexts, HMAC, MGF1, X9.63 KDF, HKDF and PBKDF2-HMAC. RSA
+PKCS #1 v1.5, OAEP and PSS encodings can be composed with caller-supplied raw
+RSA operations, independently of where the key lives. ML-KEM and ML-DSA key
+operations and serialization are shared as well. Fixed-width/DER ECDSA
+signature conversion is likewise key-implementation independent. The crate also owns SCP03
+KDF, cryptogram and padding operations, the Yubico password KDF, and both sides
+of the ARKG-P256 public/private derivation. Supported Weierstrass curves include
 P-224/P-256/P-384/P-521, secp256k1, and Brainpool P-256/P-384/P-512. Classical
 asymmetric keys also support PKCS#8 import/export at protocol boundaries such
 as YubiHSM RSA-AES key wrapping.

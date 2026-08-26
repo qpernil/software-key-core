@@ -13,7 +13,7 @@ use crate::{
         rsa_decrypt_oaep_digest, rsa_decrypt_pkcs1v15, rsa_encrypt_oaep_digest,
         rsa_encrypt_pkcs1v15, rsa_sign_pkcs1v15_digest, rsa_sign_pkcs1v15_payload,
         rsa_sign_pss_digest, rsa_sign_raw, rsa_verify_pkcs1v15_digest, rsa_verify_pss_digest,
-        rsa_verify_raw, RsaHashAlgorithm, RsaPssParameters, RsaSignatureError,
+        rsa_verify_raw, RsaConstructionError, RsaHashAlgorithm, RsaPssParameters,
     },
 };
 use bp256::r1::SecretKey as BrainpoolP256SecretKey;
@@ -73,6 +73,29 @@ impl SoftwareSigningAlgorithm {
                 | Self::RsaPkcs1Sha384
                 | Self::RsaPkcs1Sha512
         )
+    }
+
+    /// Return the curve used by an ECDSA algorithm, independently of where
+    /// the corresponding private key is implemented.
+    pub const fn ec_curve(self) -> Option<EcCurve> {
+        match self {
+            Self::EcdsaP224Sha224 => Some(EcCurve::P224),
+            Self::EcdsaP256Sha256 => Some(EcCurve::P256),
+            Self::EcdsaP384Sha384 => Some(EcCurve::P384),
+            Self::EcdsaP521Sha512 => Some(EcCurve::P521),
+            Self::EcdsaSecp256k1Sha256 => Some(EcCurve::Secp256k1),
+            Self::EcdsaBrainpoolP256Sha256 => Some(EcCurve::BrainpoolP256),
+            Self::EcdsaBrainpoolP384Sha384 => Some(EcCurve::BrainpoolP384),
+            Self::EcdsaBrainpoolP512Sha512 => Some(EcCurve::BrainpoolP512),
+            Self::Ed25519
+            | Self::RsaPssSha256
+            | Self::RsaPssSha384
+            | Self::RsaPssSha512
+            | Self::RsaPkcs1Sha256
+            | Self::RsaPkcs1Sha384
+            | Self::RsaPkcs1Sha512
+            | Self::MlDsa(_) => None,
+        }
     }
 }
 
@@ -517,15 +540,15 @@ fn verify_rsa_prehash(
     result.map_err(map_rsa_verification_error)
 }
 
-fn map_rsa_verification_error(error: RsaSignatureError) -> SoftwareSigningError {
+fn map_rsa_verification_error(error: RsaConstructionError) -> SoftwareSigningError {
     match error {
-        RsaSignatureError::InvalidKey => SoftwareSigningError::InvalidPublicKey,
-        RsaSignatureError::InputTooLong
-        | RsaSignatureError::InputOutOfRange
-        | RsaSignatureError::InvalidDigestLength
-        | RsaSignatureError::InvalidSignature
-        | RsaSignatureError::RandomnessUnavailable
-        | RsaSignatureError::OperationFailed => SoftwareSigningError::InvalidSignature,
+        RsaConstructionError::InvalidKey => SoftwareSigningError::InvalidPublicKey,
+        RsaConstructionError::InputTooLong
+        | RsaConstructionError::InputOutOfRange
+        | RsaConstructionError::InvalidDigestLength
+        | RsaConstructionError::InvalidSignature
+        | RsaConstructionError::RandomnessUnavailable
+        | RsaConstructionError::OperationFailed => SoftwareSigningError::InvalidSignature,
     }
 }
 
@@ -544,6 +567,91 @@ impl SoftwareSignature {
     pub fn into_bytes(self) -> Vec<u8> {
         self.0
     }
+
+    /// Encode a fixed-width ECDSA signature as ASN.1 DER without requiring a
+    /// private or public key implementation.
+    pub fn to_ecdsa_der(&self, curve: EcCurve) -> Result<Vec<u8>, SoftwareSigningError> {
+        macro_rules! encode {
+            ($curve:ty) => {{
+                ecdsa::Signature::<$curve>::from_slice(&self.0)
+                    .map(|signature| signature.to_der().as_bytes().to_vec())
+                    .map_err(|_| SoftwareSigningError::InvalidSignature)
+            }};
+        }
+        match curve {
+            EcCurve::P224 => encode!(p224::NistP224),
+            EcCurve::P256 => encode!(p256::NistP256),
+            EcCurve::P384 => encode!(p384::NistP384),
+            EcCurve::P521 => encode!(p521::NistP521),
+            EcCurve::Secp256k1 => encode!(k256::Secp256k1),
+            EcCurve::BrainpoolP256 => encode!(bp256::BrainpoolP256r1),
+            EcCurve::BrainpoolP384 => encode!(bp384::BrainpoolP384r1),
+            EcCurve::BrainpoolP512 => encode!(BrainpoolP512r1),
+        }
+    }
+}
+
+fn der_length(encoded: &[u8], offset: &mut usize) -> Option<usize> {
+    let first = *encoded.get(*offset)?;
+    *offset += 1;
+    match first {
+        0..=0x7f => Some(first as usize),
+        0x81 => {
+            let length = *encoded.get(*offset)? as usize;
+            *offset += 1;
+            (length >= 0x80).then_some(length)
+        }
+        _ => None,
+    }
+}
+
+fn der_positive_integer<'a>(encoded: &'a [u8], offset: &mut usize) -> Option<&'a [u8]> {
+    if *encoded.get(*offset)? != 0x02 {
+        return None;
+    }
+    *offset += 1;
+    let length = der_length(encoded, offset)?;
+    let value = encoded.get(*offset..offset.checked_add(length)?)?;
+    *offset += length;
+    if value.is_empty() || value[0] & 0x80 != 0 {
+        return None;
+    }
+    if value.len() > 1 && value[0] == 0 {
+        if value[1] & 0x80 == 0 {
+            return None;
+        }
+        Some(&value[1..])
+    } else {
+        Some(value)
+    }
+}
+
+/// Convert a canonical ASN.1 DER ECDSA signature to fixed-width `r || s`
+/// without requiring a public or private key implementation.
+pub fn ecdsa_signature_from_der(
+    signature: &[u8],
+    coordinate_length: usize,
+) -> Result<Vec<u8>, SoftwareSigningError> {
+    let invalid = || SoftwareSigningError::InvalidSignature;
+    let mut offset = 0;
+    if coordinate_length == 0 || signature.get(offset) != Some(&0x30) {
+        return Err(invalid());
+    }
+    offset += 1;
+    let sequence_length = der_length(signature, &mut offset).ok_or_else(invalid)?;
+    if offset.checked_add(sequence_length) != Some(signature.len()) {
+        return Err(invalid());
+    }
+    let r = der_positive_integer(signature, &mut offset).ok_or_else(invalid)?;
+    let s = der_positive_integer(signature, &mut offset).ok_or_else(invalid)?;
+    if offset != signature.len() || r.len() > coordinate_length || s.len() > coordinate_length {
+        return Err(invalid());
+    }
+    let output_length = coordinate_length.checked_mul(2).ok_or_else(invalid)?;
+    let mut output = vec![0; output_length];
+    output[coordinate_length - r.len()..coordinate_length].copy_from_slice(r);
+    output[output_length - s.len()..].copy_from_slice(s);
+    Ok(output)
 }
 
 #[derive(Clone)]
@@ -1218,15 +1326,15 @@ fn rsa_sign_prehash(
     result.map_err(map_rsa_signing_error)
 }
 
-fn map_rsa_signing_error(error: RsaSignatureError) -> SoftwareSigningError {
+fn map_rsa_signing_error(error: RsaConstructionError) -> SoftwareSigningError {
     match error {
-        RsaSignatureError::InvalidKey => SoftwareSigningError::InvalidPrivateKey,
-        RsaSignatureError::RandomnessUnavailable => SoftwareSigningError::RandomnessUnavailable,
-        RsaSignatureError::InputTooLong
-        | RsaSignatureError::InputOutOfRange
-        | RsaSignatureError::InvalidDigestLength
-        | RsaSignatureError::InvalidSignature
-        | RsaSignatureError::OperationFailed => SoftwareSigningError::SigningFailed,
+        RsaConstructionError::InvalidKey => SoftwareSigningError::InvalidPrivateKey,
+        RsaConstructionError::RandomnessUnavailable => SoftwareSigningError::RandomnessUnavailable,
+        RsaConstructionError::InputTooLong
+        | RsaConstructionError::InputOutOfRange
+        | RsaConstructionError::InvalidDigestLength
+        | RsaConstructionError::InvalidSignature
+        | RsaConstructionError::OperationFailed => SoftwareSigningError::SigningFailed,
     }
 }
 
@@ -1406,6 +1514,14 @@ mod tests {
             let key = SoftwareSigningKey::generate(algorithm).unwrap();
             let public_key = key.public_key();
             let signature = key.sign_prehash(algorithm, &prehash).unwrap();
+            let der = signature
+                .to_ecdsa_der(algorithm.ec_curve().unwrap())
+                .unwrap();
+            assert_eq!(der.first(), Some(&0x30));
+            assert_eq!(
+                ecdsa_signature_from_der(&der, signature.as_bytes().len() / 2).unwrap(),
+                signature.as_bytes()
+            );
             public_key
                 .verify_prehash(algorithm, &prehash, signature.as_bytes())
                 .unwrap();

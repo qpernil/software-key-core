@@ -15,6 +15,7 @@ bp256 = { version = "=0.14.0-rc.15", default-features = false, features = ["arit
 bp384 = { version = "=0.14.0-rc.15", default-features = false, features = ["arithmetic", "ecdsa", "pkcs8", "sha384", "std"] }
 ccm = "0.5.0"
 cmac = "0.7.2"
+des = "0.8.1"
 ed25519-dalek = { version = "3.0.0", features = ["alloc", "pkcs8"] }
 getrandom = "0.4.3"
 ghash = "0.6.0"
@@ -22,6 +23,7 @@ hkdf = "0.13.0"
 hmac = "0.13.0"
 k256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "std"] }
 ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "pkcs8", "zeroize"] }
+ml-kem = { version = "0.3.2", features = ["pkcs8", "zeroize"] }
 num-bigint-dig = "0.8.6"
 pbkdf2 = { version = "0.13.0", features = ["hmac"] }
 p256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "precomputed-tables", "std"] }
