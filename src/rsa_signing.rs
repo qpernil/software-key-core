@@ -652,4 +652,123 @@ mod tests {
             b"secret"
         );
     }
+
+    #[test]
+    fn pkcs1_and_oaep_padding_reject_malformed_encodings() {
+        let pkcs1 = rsa_pkcs1v15_pad(b"secret", 64).unwrap();
+        assert_eq!(rsa_pkcs1v15_unpad(&pkcs1).unwrap(), b"secret");
+        for malformed in [
+            vec![0; 10],
+            vec![0, 1, 0xff, 0xff, 0, 1, 2, 3, 4, 5, 6],
+            vec![0, 2, 1, 2, 3, 4, 5, 6, 7, 0, 9],
+            vec![0, 2, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        ] {
+            assert_eq!(
+                rsa_pkcs1v15_unpad(&malformed),
+                Err(RsaConstructionError::OperationFailed)
+            );
+        }
+
+        let label = RsaHashAlgorithm::Sha256.digest(b"label");
+        let encoded =
+            rsa_oaep_pad_digest(b"secret", 128, &label, RsaHashAlgorithm::Sha256).unwrap();
+        assert_eq!(
+            rsa_oaep_unpad_digest(&encoded, &label, RsaHashAlgorithm::Sha256).unwrap(),
+            b"secret"
+        );
+        let wrong_label = RsaHashAlgorithm::Sha256.digest(b"other label");
+        assert_eq!(
+            rsa_oaep_unpad_digest(&encoded, &wrong_label, RsaHashAlgorithm::Sha256),
+            Err(RsaConstructionError::OperationFailed)
+        );
+        assert_eq!(
+            rsa_oaep_unpad_digest(&[0; 16], &label, RsaHashAlgorithm::Sha256),
+            Err(RsaConstructionError::OperationFailed)
+        );
+    }
+
+    #[test]
+    fn pss_encoding_rejects_wrong_digests_parameters_and_tampering() {
+        let parameters = RsaPssParameters {
+            hash: RsaHashAlgorithm::Sha256,
+            mgf_hash: RsaHashAlgorithm::Sha384,
+            salt_length: 24,
+        };
+        let digest = parameters.hash.digest(b"message");
+        let mut encoded = pss_encoded_digest(2_048, parameters, &digest).unwrap();
+        verify_pss_encoded_digest(&encoded, 2_048, parameters, &digest).unwrap();
+        *encoded.last_mut().unwrap() ^= 1;
+        assert_eq!(
+            verify_pss_encoded_digest(&encoded, 2_048, parameters, &digest),
+            Err(RsaConstructionError::InvalidSignature)
+        );
+        assert_eq!(
+            pss_encoded_digest(2_048, parameters, &[0; 31]),
+            Err(RsaConstructionError::InvalidDigestLength)
+        );
+        assert_eq!(
+            pss_encoded_digest(1, parameters, &digest),
+            Err(RsaConstructionError::InputTooLong)
+        );
+        assert_eq!(
+            digest_info(RsaHashAlgorithm::Sha512, &[0; 63]),
+            Err(RsaConstructionError::InvalidDigestLength)
+        );
+    }
+
+    #[test]
+    fn callback_constructions_preserve_errors_and_validate_output_lengths() {
+        assert_eq!(
+            pkcs1v15_sign_with(128, b"payload", |_| Err::<Vec<u8>, _>("unavailable")),
+            Err(AsymmetricConstructionError::Operation("unavailable"))
+        );
+        assert_eq!(
+            pkcs1v15_sign_with(128, b"payload", |_| { Ok::<_, &'static str>(vec![0; 127]) }),
+            Err(AsymmetricConstructionError::InvalidOperationOutput)
+        );
+
+        let label = RsaHashAlgorithm::Sha256.digest(b"label");
+        assert_eq!(
+            oaep_decrypt_with(128, b"ciphertext", &label, RsaHashAlgorithm::Sha256, |_| {
+                Ok::<_, &'static str>(vec![0; 127])
+            }),
+            Err(AsymmetricConstructionError::InvalidOperationOutput)
+        );
+        assert_eq!(
+            pss_sign_with(
+                1_024,
+                RsaPssParameters {
+                    hash: RsaHashAlgorithm::Sha256,
+                    mgf_hash: RsaHashAlgorithm::Sha256,
+                    salt_length: 32,
+                },
+                &[0; 31],
+                |_| Ok::<_, &'static str>(vec![0; 128]),
+            ),
+            Err(AsymmetricConstructionError::Encoding(
+                RsaConstructionError::InvalidDigestLength
+            ))
+        );
+    }
+
+    #[test]
+    fn raw_rsa_rejects_out_of_range_inputs_and_wrong_signature_sizes() {
+        let (private, public) = key_pair();
+        assert_eq!(
+            rsa_sign_raw(&private, &vec![0xff; private.size() + 1]),
+            Err(RsaConstructionError::InputTooLong)
+        );
+        assert_eq!(
+            rsa_verify_raw(&public, b"input", &[0; 1]),
+            Err(RsaConstructionError::InvalidSignature)
+        );
+        assert_eq!(
+            rsa_verify_raw(
+                &public,
+                &vec![0; public.size() + 1],
+                &vec![0; public.size()],
+            ),
+            Err(RsaConstructionError::InputTooLong)
+        );
+    }
 }

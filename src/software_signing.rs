@@ -1640,4 +1640,59 @@ mod tests {
             plaintext
         );
     }
+
+    #[test]
+    fn signing_keys_reject_malformed_material_and_algorithm_mismatches() {
+        for algorithm in [
+            SoftwareSigningAlgorithm::EcdsaP224Sha224,
+            SoftwareSigningAlgorithm::EcdsaP256Sha256,
+            SoftwareSigningAlgorithm::Ed25519,
+            SoftwareSigningAlgorithm::EcdsaP384Sha384,
+            SoftwareSigningAlgorithm::EcdsaP521Sha512,
+            SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256,
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384,
+            SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512,
+            SoftwareSigningAlgorithm::RsaPssSha256,
+            SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa44),
+        ] {
+            assert!(matches!(
+                SoftwareSigningKey::from_serialized(algorithm, &[0; 1]),
+                Err(SoftwareSigningError::InvalidPrivateKey)
+            ));
+        }
+
+        let ed25519 = SoftwareSigningKey::generate(SoftwareSigningAlgorithm::Ed25519).unwrap();
+        assert_eq!(
+            ed25519.sign_prehash(SoftwareSigningAlgorithm::EcdsaP256Sha256, &[0; 32]),
+            Err(SoftwareSigningError::AlgorithmMismatch)
+        );
+        assert_eq!(
+            ed25519.rsa_size(),
+            Err(SoftwareSigningError::AlgorithmMismatch)
+        );
+
+        let p256 = SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256).unwrap();
+        assert_eq!(
+            p256.sign_message(SoftwareSigningAlgorithm::Ed25519, b"message"),
+            Err(SoftwareSigningError::AlgorithmMismatch)
+        );
+    }
+
+    #[test]
+    fn ecdsa_der_conversion_rejects_noncanonical_and_trailing_encodings() {
+        for (signature, coordinate_length) in [
+            (Vec::new(), 32),
+            (vec![0x30, 0], 0),
+            (vec![0x31, 0], 32),
+            (vec![0x30, 6, 2, 1, 0x80, 2, 1, 1], 32),
+            (vec![0x30, 6, 2, 1, 1, 2, 1, 1, 0], 32),
+            (vec![0x30, 7, 2, 2, 0, 1, 2, 1, 1], 32),
+        ] {
+            assert_eq!(
+                ecdsa_signature_from_der(&signature, coordinate_length),
+                Err(SoftwareSigningError::InvalidSignature)
+            );
+        }
+    }
 }

@@ -101,6 +101,48 @@ consumer retains a default production dependency on a curve implementation,
 or a direct AES, Triple-DES, CCM, CMAC, GHASH, HMAC, HKDF, PBKDF2, SHA-1,
 SHA-2, SHA-3 or ML-KEM dependency.
 
+## RSA implementation follow-up
+
+The current shared implementation uses the stable pure-Rust `rsa` 0.9.10
+release with `num-bigint-dig` 0.8.6 and 64-bit digits. Private operations are
+not naive full-modulus exponentiation: generated and imported keys precompute
+the CRT parameters, and signing/decryption uses CRT, random blinding and a
+public-operation check of the recombined result. The bigint backend uses
+windowed Montgomery exponentiation. Retaining a pure-Rust implementation is
+preferred over adopting OpenSSL, AWS-LC or another FFI backend merely for
+speed.
+
+RustCrypto `rsa` 0.10.0-rc.18 replaces `num-bigint-dig` with the pure-Rust
+`crypto-bigint` and `crypto-primes` stack. A release-build comparison performed
+on an Apple M5 on 2026-08-26 produced the following results. RSA key-generation
+times are naturally noisy because prime search is probabilistic.
+
+| Implementation | RSA-4096 key generation mean | Median | Blinded RSA-4096 private operation |
+| --- | ---: | ---: | ---: |
+| `rsa` 0.9.10 | 1.089 s | 1.143 s | 4.9-5.0 ms |
+| `rsa` 0.10.0-rc.18 | 0.431 s | 0.441 s | 5.4-5.5 ms |
+
+The key-generation figures are ten independent keys per implementation. The
+private-operation figures are two runs of twenty PKCS #1 v1.5 decryptions. The
+release candidate was approximately 2.5 times faster for RSA-4096 generation,
+but approximately 10 percent slower for an existing-key private operation. Its
+built-in RSA key generation remained single-threaded during this measurement.
+
+Version 0.10 retains the capabilities required by the shared layer: CRT and
+precomputation, blinding and CRT-result verification, raw public/private
+operations, construction from `p` and `q`, RSA-4096 generation, and the
+PKCS #1 v1.5, OAEP and PSS schemes. Migration nevertheless requires adapting
+the shared boundary from `BigUint` to precision-bearing `BoxedUint`, retrieving
+`qInv` from Montgomery form for CRT export, and retesting every raw-operation
+and encoding path.
+
+Do not adopt the release candidate solely to improve virtual-device
+provisioning time. Reconsider the migration when RustCrypto publishes a stable
+0.10 release. At that point, repeat the benchmarks on macOS and the `ubuntu3`
+deployment target, review the then-current upstream RSA side-channel status,
+and run the complete `software-key-core`, `pkcs11rs`, `virtual-yubihsm` and
+`virtual-yubikey` suites before changing the shared dependency.
+
 ## Constructions which should remain protocol-specific
 
 The following combine shared primitives but encode protocol rules and should
