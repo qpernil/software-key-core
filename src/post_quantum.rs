@@ -631,4 +631,79 @@ mod tests {
             Err(MlDsaError::InvalidContext)
         );
     }
+
+    #[test]
+    fn ml_kem_rejects_malformed_key_and_ciphertext_lengths() {
+        for parameter_set in [
+            MlKemParameterSet::MlKem512,
+            MlKemParameterSet::MlKem768,
+            MlKemParameterSet::MlKem1024,
+        ] {
+            assert!(matches!(
+                MlKemPrivateKey::from_seed_slice(parameter_set, &[0; 63]),
+                Err(MlKemError::InvalidSeedLength)
+            ));
+            assert!(matches!(
+                MlKemPrivateKey::from_expanded_private_key(
+                    parameter_set,
+                    &vec![0; parameter_set.expanded_private_key_length() - 1],
+                ),
+                Err(MlKemError::InvalidExpandedPrivateKey)
+            ));
+            assert_eq!(
+                ml_kem_encapsulate(
+                    parameter_set,
+                    &vec![0; parameter_set.public_key_length() - 1],
+                ),
+                Err(MlKemError::InvalidPublicKey)
+            );
+
+            let key = MlKemPrivateKey::from_seed(parameter_set, [3; 64]);
+            assert_eq!(
+                key.decapsulate(&vec![0; parameter_set.ciphertext_length() - 1]),
+                Err(MlKemError::InvalidCiphertext)
+            );
+        }
+    }
+
+    #[test]
+    fn ml_dsa_rejects_malformed_keys_signatures_and_messages() {
+        let parameter_set = MlDsaParameterSet::MlDsa44;
+        assert!(matches!(
+            MlDsaPrivateKey::from_seed_slice(parameter_set, &[0; 31]),
+            Err(MlDsaError::InvalidSeedLength)
+        ));
+        assert_eq!(
+            validate_ml_dsa_public_key(
+                parameter_set,
+                &vec![0; parameter_set.public_key_length() - 1],
+            ),
+            Err(MlDsaError::InvalidPublicKey)
+        );
+
+        let key = MlDsaPrivateKey::from_seed(parameter_set, [5; 32]);
+        let public_key = key.public_key();
+        let mut signature = key.sign_deterministic(b"message", b"context").unwrap();
+        signature[0] ^= 1;
+        assert_eq!(
+            verify_ml_dsa(
+                parameter_set,
+                &public_key,
+                b"message",
+                b"context",
+                &signature,
+            ),
+            Err(MlDsaError::InvalidSignature)
+        );
+        assert_eq!(
+            verify_ml_dsa(
+                parameter_set,
+                &public_key,
+                b"message",
+                b"context",
+                &signature[..signature.len() - 1],
+            ),
+            Err(MlDsaError::InvalidSignature)
+        );
+    }
 }

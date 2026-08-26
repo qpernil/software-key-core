@@ -64,7 +64,7 @@ pub fn cbc_with<E>(
     if iv.len() != block_size {
         return Err(BlockCipherModeError::InvalidIvLength);
     }
-    if !input.len().is_multiple_of(block_size) {
+    if input.len() % block_size != 0 {
         return Err(BlockCipherModeError::InvalidDataLength);
     }
     let mut previous = iv.to_vec();
@@ -246,7 +246,7 @@ pub fn key_wrap_with<E>(
         return Err(KeyWrapError::InvalidInitialValue);
     }
     if encrypting {
-        if input.len() < AES_BLOCK_SIZE || !input.len().is_multiple_of(KEY_WRAP_SEMIBLOCK_SIZE) {
+        if input.len() < AES_BLOCK_SIZE || input.len() % KEY_WRAP_SEMIBLOCK_SIZE != 0 {
             return Err(KeyWrapError::InvalidDataLength);
         }
         let a = initial_value
@@ -258,7 +258,7 @@ pub fn key_wrap_with<E>(
         return Ok(output);
     }
     if input.len() < AES_BLOCK_SIZE + KEY_WRAP_SEMIBLOCK_SIZE
-        || !input.len().is_multiple_of(KEY_WRAP_SEMIBLOCK_SIZE)
+        || input.len() % KEY_WRAP_SEMIBLOCK_SIZE != 0
     {
         return Err(KeyWrapError::InvalidDataLength);
     }
@@ -310,7 +310,7 @@ pub fn key_wrap_with_padding_with<E>(
         output.extend_from_slice(&r);
         return Ok(output);
     }
-    if input.len() < AES_BLOCK_SIZE || !input.len().is_multiple_of(KEY_WRAP_SEMIBLOCK_SIZE) {
+    if input.len() < AES_BLOCK_SIZE || input.len() % KEY_WRAP_SEMIBLOCK_SIZE != 0 {
         return Err(KeyWrapError::InvalidDataLength);
     }
     let semiblocks = input.len() / KEY_WRAP_SEMIBLOCK_SIZE - 1;
@@ -376,7 +376,7 @@ pub fn cmac_with<E>(
         return Err(BlockCipherModeError::InvalidBlockOutput);
     }
     let subkey = cmac_double(encrypted_zero);
-    let complete = !data.is_empty() && data.len().is_multiple_of(block_size);
+    let complete = !data.is_empty() && data.len() % block_size == 0;
     let last_subkey = if complete {
         subkey
     } else {
@@ -599,7 +599,7 @@ fn increment_gcm_counter(counter: &mut [u8; AES_BLOCK_SIZE]) {
 fn gcm_tag(full_tag: [u8; AES_BLOCK_SIZE], tag_bits: usize) -> Vec<u8> {
     let tag_length = tag_bits.div_ceil(8);
     let mut tag = full_tag[..tag_length].to_vec();
-    if !tag_bits.is_multiple_of(8) {
+    if tag_bits % 8 != 0 {
         let mask = 0xff << (8 - tag_bits % 8);
         if let Some(last) = tag.last_mut() {
             *last &= mask;
@@ -1023,7 +1023,7 @@ fn crypt_tdes_ecb(
     if key.len() != 24 {
         return Err(SoftwareSymmetricError::InvalidKeyLength);
     }
-    if !input.len().is_multiple_of(TDES_BLOCK_SIZE) {
+    if input.len() % TDES_BLOCK_SIZE != 0 {
         return Err(SoftwareSymmetricError::InvalidDataLength);
     }
     let cipher =
@@ -1347,6 +1347,186 @@ mod tests {
                 [0x55; 22]
             );
         }
+    }
+
+    #[test]
+    fn pkcs7_padding_round_trips_boundaries_and_rejects_malformed_suffixes() {
+        for plaintext in [
+            b"".as_slice(),
+            b"a".as_slice(),
+            b"sixteen-byte-msg".as_slice(),
+            b"seventeen-byte-msg".as_slice(),
+        ] {
+            let padded = apply_pkcs7_padding(plaintext, AES_BLOCK_SIZE).unwrap();
+            assert_eq!(padded.len() % AES_BLOCK_SIZE, 0);
+            assert_eq!(
+                remove_pkcs7_padding(padded.to_vec(), AES_BLOCK_SIZE).unwrap(),
+                plaintext
+            );
+        }
+        assert_eq!(
+            apply_pkcs7_padding(b"data", 0),
+            Err(Pkcs7PaddingError::InvalidBlockLength)
+        );
+        assert_eq!(
+            apply_pkcs7_padding(b"data", 256),
+            Err(Pkcs7PaddingError::InvalidBlockLength)
+        );
+        assert_eq!(
+            remove_pkcs7_padding(vec![0; AES_BLOCK_SIZE], AES_BLOCK_SIZE),
+            Err(Pkcs7PaddingError::InvalidPadding)
+        );
+        let mut inconsistent = vec![0x41; AES_BLOCK_SIZE];
+        inconsistent[AES_BLOCK_SIZE - 2..].copy_from_slice(&[1, 2]);
+        assert_eq!(
+            remove_pkcs7_padding(inconsistent, AES_BLOCK_SIZE),
+            Err(Pkcs7PaddingError::InvalidPadding)
+        );
+    }
+
+    #[test]
+    fn generic_block_modes_validate_parameters_outputs_and_callback_errors() {
+        assert_eq!(
+            cbc_with(0, &[], &[], true, |input, _| {
+                Ok::<_, &'static str>(input.to_vec())
+            }),
+            Err(BlockCipherModeError::InvalidBlockSize)
+        );
+        assert_eq!(
+            cbc_with(16, &[0; 15], &[], true, |input, _| {
+                Ok::<_, &'static str>(input.to_vec())
+            }),
+            Err(BlockCipherModeError::InvalidIvLength)
+        );
+        assert_eq!(
+            cbc_with(16, &[0; 16], &[0; 15], true, |input, _| {
+                Ok::<_, &'static str>(input.to_vec())
+            }),
+            Err(BlockCipherModeError::InvalidDataLength)
+        );
+        assert_eq!(
+            cbc_with(16, &[0; 16], &[0; 16], true, |_, _| {
+                Err::<Vec<u8>, _>("cipher failed")
+            }),
+            Err(BlockCipherModeError::BlockOperation("cipher failed"))
+        );
+        assert_eq!(
+            cbc_with(16, &[0; 16], &[0; 16], true, |_, _| {
+                Ok::<_, &'static str>(vec![0; 15])
+            }),
+            Err(BlockCipherModeError::InvalidBlockOutput)
+        );
+
+        assert_eq!(
+            cmac_with(12, b"data", |input| Ok::<_, &'static str>(input.to_vec())),
+            Err(BlockCipherModeError::InvalidBlockSize)
+        );
+        assert_eq!(
+            cmac_with(16, b"data", |_| Err::<Vec<u8>, _>("cipher failed")),
+            Err(BlockCipherModeError::BlockOperation("cipher failed"))
+        );
+        assert_eq!(
+            ctr_with(0, &[0; 16], b"data", |input| {
+                Ok::<_, &'static str>(input.to_vec())
+            }),
+            Err(BlockCipherModeError::InvalidCounterBits)
+        );
+        assert_eq!(
+            ctr_with(128, &[0; 16], b"data", |_| {
+                Ok::<_, &'static str>(Vec::new())
+            }),
+            Err(BlockCipherModeError::InvalidBlockOutput)
+        );
+    }
+
+    #[test]
+    fn generic_aead_and_key_wrap_validate_before_releasing_data() {
+        assert_eq!(
+            gcm_with(&[], &[], 128, b"data", true, |input| {
+                Ok::<_, &'static str>(input.to_vec())
+            }),
+            Err(GcmError::InvalidIvLength)
+        );
+        assert_eq!(
+            gcm_with(&[0; 12], &[], 129, b"data", true, |input| {
+                Ok::<_, &'static str>(input.to_vec())
+            }),
+            Err(GcmError::InvalidTagLength)
+        );
+        assert_eq!(
+            gcm_with(&[0; 12], &[], 128, &[0; 15], false, |input| {
+                Ok::<_, &'static str>(input.to_vec())
+            }),
+            Err(GcmError::CiphertextTooShort)
+        );
+        assert_eq!(
+            gcm_with(&[0; 12], &[], 128, b"data", true, |_| {
+                Err::<Vec<u8>, _>("cipher failed")
+            }),
+            Err(GcmError::BlockOperation("cipher failed"))
+        );
+
+        assert_eq!(
+            ccm_with(0, &[0; 6], &[], 16, &[], true, |_, input| {
+                Ok::<_, &'static str>(input.to_vec())
+            }),
+            Err(CcmError::InvalidNonceLength)
+        );
+        assert_eq!(
+            ccm_with(0, &[0; 13], &[], 5, &[], true, |_, input| {
+                Ok::<_, &'static str>(input.to_vec())
+            }),
+            Err(CcmError::InvalidTagLength)
+        );
+        assert_eq!(
+            ccm_with(0, &[0; 13], &[], 16, &[], true, |_, _| {
+                Err::<Vec<u8>, _>("cipher failed")
+            }),
+            Err(CcmError::BlockOperation("cipher failed"))
+        );
+
+        assert_eq!(
+            key_wrap_with(&[0; 16], true, &[0; 7], |input, _| {
+                Ok::<_, &'static str>(input.to_vec())
+            }),
+            Err(KeyWrapError::InvalidInitialValue)
+        );
+        assert_eq!(
+            key_wrap_with(&[0; 8], true, &[0; 8], |input, _| {
+                Ok::<_, &'static str>(input.to_vec())
+            }),
+            Err(KeyWrapError::InvalidDataLength)
+        );
+        assert_eq!(
+            key_wrap_with(&[0; 16], true, &[0; 8], |_, _| {
+                Err::<Vec<u8>, _>("cipher failed")
+            }),
+            Err(KeyWrapError::BlockOperation("cipher failed"))
+        );
+    }
+
+    #[test]
+    fn software_cipher_adapters_reject_invalid_keys_ivs_and_block_lengths() {
+        assert_eq!(
+            encrypt_aes_ecb(&[0; 15], &[0; AES_BLOCK_SIZE]),
+            Err(SoftwareSymmetricError::InvalidKeyLength)
+        );
+        assert_eq!(
+            encrypt_aes_ecb(&[0; 16], &[0; AES_BLOCK_SIZE - 1]),
+            Err(SoftwareSymmetricError::InvalidDataLength)
+        );
+        assert_eq!(
+            encrypt_aes_cbc(&[0; 16], &[0; AES_BLOCK_SIZE - 1], &[]),
+            Err(SoftwareSymmetricError::InvalidIvLength)
+        );
+        assert_eq!(
+            encrypt_tdes_ecb(&[0; 23], &[0; TDES_BLOCK_SIZE]),
+            Err(SoftwareSymmetricError::InvalidKeyLength)
+        );
+        assert_eq!(
+            decrypt_tdes_cbc(&[0; 24], &[0; TDES_BLOCK_SIZE], &[0; TDES_BLOCK_SIZE - 1]),
+            Err(SoftwareSymmetricError::InvalidDataLength)
+        );
     }
 
     fn hex(value: &str) -> Vec<u8> {

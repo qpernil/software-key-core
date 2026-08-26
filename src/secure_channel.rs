@@ -191,6 +191,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn iso7816_unpadding_rejects_missing_and_malformed_markers() {
+        assert_eq!(
+            unpad_iso7816(Vec::new()),
+            Err(SecureChannelCryptoError::InvalidPadding)
+        );
+        assert_eq!(
+            unpad_iso7816(vec![0; AES_BLOCK_SIZE]),
+            Err(SecureChannelCryptoError::InvalidPadding)
+        );
+        assert_eq!(
+            unpad_iso7816(vec![0x41, 0x81, 0, 0]),
+            Err(SecureChannelCryptoError::InvalidPadding)
+        );
+        assert_eq!(pad_iso7816(&[]), {
+            let mut expected = vec![0; AES_BLOCK_SIZE];
+            expected[0] = 0x80;
+            expected
+        });
+    }
+
+    #[test]
+    fn scp03_kdf_rejects_invalid_lengths_and_keys() {
+        let key = [0; AES_BLOCK_SIZE];
+        assert_eq!(
+            scp03_kdf(&key, 1, b"context", 0),
+            Err(SecureChannelCryptoError::InvalidDataLength)
+        );
+        assert_eq!(
+            scp03_kdf(&key, 1, b"context", 7),
+            Err(SecureChannelCryptoError::InvalidDataLength)
+        );
+        assert_eq!(
+            scp03_kdf(&[0; 15], 1, b"context", 128),
+            Err(SecureChannelCryptoError::Symmetric(
+                SoftwareSymmetricError::InvalidKeyLength
+            ))
+        );
+    }
+
     fn hex(value: &str) -> Vec<u8> {
         value
             .as_bytes()

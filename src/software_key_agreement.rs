@@ -190,4 +190,24 @@ mod tests {
             Err(SoftwareKeyAgreementError::NonContributoryPublicKey)
         );
     }
+
+    #[test]
+    fn agreement_rejects_invalid_private_keys_peers_and_key_kinds() {
+        assert!(matches!(
+            SoftwareX25519Key::from_serialized(&[0; 31]),
+            Err(SoftwareKeyAgreementError::InvalidPrivateKey)
+        ));
+
+        let p256 = SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256).unwrap();
+        assert_eq!(
+            derive_with_signing_key(&p256, &[4, 1, 2, 3]),
+            Err(SoftwareKeyAgreementError::InvalidPublicKey)
+        );
+
+        let ed25519 = SoftwareSigningKey::generate(SoftwareSigningAlgorithm::Ed25519).unwrap();
+        assert_eq!(
+            derive_with_signing_key(&ed25519, &[0; 32]),
+            Err(SoftwareKeyAgreementError::AlgorithmMismatch)
+        );
+    }
 }

@@ -365,4 +365,66 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn every_hash_streams_like_one_shot_and_reports_its_length() {
+        for algorithm in [
+            HashAlgorithm::Sha1,
+            HashAlgorithm::Sha224,
+            HashAlgorithm::Sha256,
+            HashAlgorithm::Sha384,
+            HashAlgorithm::Sha512,
+            HashAlgorithm::Sha3_224,
+            HashAlgorithm::Sha3_256,
+            HashAlgorithm::Sha3_384,
+            HashAlgorithm::Sha3_512,
+        ] {
+            let mut context = HashContext::new(algorithm);
+            context.update(b"shared ");
+            context.update(b"digest boundary");
+            let streamed = context.finalize();
+            assert_eq!(streamed, algorithm.digest(b"shared digest boundary"));
+            assert_eq!(streamed.len(), algorithm.output_length());
+            assert_eq!(algorithm.size(), algorithm.output_length());
+            assert_eq!(
+                hmac(algorithm, b"key", b"message").unwrap().len(),
+                algorithm.output_length()
+            );
+        }
+    }
+
+    #[test]
+    fn kdfs_reject_invalid_prks_and_excessive_outputs() {
+        assert_eq!(
+            hkdf(HashAlgorithm::Sha256, false, true, &[], None, b"info", 16,),
+            Err(DigestConstructionError::InvalidPseudoRandomKey)
+        );
+        assert_eq!(
+            hkdf(
+                HashAlgorithm::Sha256,
+                true,
+                true,
+                b"input",
+                None,
+                b"info",
+                255 * HashAlgorithm::Sha256.output_length() + 1,
+            ),
+            Err(DigestConstructionError::OutputTooLong)
+        );
+        assert_eq!(
+            x963_kdf(HashAlgorithm::Sha256, b"secret", b"info", 0),
+            Err(DigestConstructionError::OutputTooLong)
+        );
+
+        if let Ok(excessive_blocks) = usize::try_from(u64::from(u32::MAX) + 2) {
+            let excessive_mgf = HashAlgorithm::Sha1
+                .output_length()
+                .checked_mul(excessive_blocks)
+                .unwrap();
+            assert_eq!(
+                mgf1(HashAlgorithm::Sha1, b"seed", excessive_mgf),
+                Err(DigestConstructionError::OutputTooLong)
+            );
+        }
+    }
 }
