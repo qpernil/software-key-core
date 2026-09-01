@@ -565,9 +565,11 @@ mod tests {
             let encoded = key.to_pkcs8_der().unwrap();
             let restored = MlKemPrivateKey::from_pkcs8_der(parameter_set, &encoded).unwrap();
             assert_eq!(restored.public_key(), key.public_key());
-            assert!(!ml_kem_public_key_info(parameter_set, &key.public_key())
-                .unwrap()
-                .is_empty());
+            assert!(
+                !ml_kem_public_key_info(parameter_set, &key.public_key())
+                    .unwrap()
+                    .is_empty()
+            );
         }
     }
 

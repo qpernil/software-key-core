@@ -31,8 +31,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Install Rust 1.85
-        uses: dtolnay/rust-toolchain@1.85.0
+      - name: Install Rust 1.94
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Check minimum supported Rust version
         run: cargo check --locked

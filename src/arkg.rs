@@ -9,12 +9,12 @@
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use p256::{
+    FieldBytes, ProjectivePoint, PublicKey, Scalar,
     elliptic_curve::{
+        Group,
         group::ff::{Field, PrimeField},
         sec1::ToSec1Point,
-        Group,
     },
-    FieldBytes, ProjectivePoint, PublicKey, Scalar,
 };
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;

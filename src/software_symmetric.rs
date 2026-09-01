@@ -1,17 +1,17 @@
 //! Protocol-neutral block-cipher constructions and software-key adapters.
 
 use aes::{
-    cipher::{generic_array::GenericArray, BlockDecrypt, BlockEncrypt, KeyInit},
     Aes128, Aes192, Aes256,
+    cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray},
 };
 use ccm::{
-    aead::{generic_array::GenericArray as AeadArray, Aead},
-    consts::{U13, U16},
     Ccm,
+    aead::{Aead, generic_array::GenericArray as AeadArray},
+    consts::{U13, U16},
 };
 use cmac::{Cmac, Mac};
 use des::TdesEde3;
-use ghash::{universal_hash::UniversalHash, GHash};
+use ghash::{GHash, universal_hash::UniversalHash};
 use subtle::{ConstantTimeEq, ConstantTimeGreater, ConstantTimeLess};
 use zeroize::Zeroizing;
 
@@ -64,7 +64,7 @@ pub fn cbc_with<E>(
     if iv.len() != block_size {
         return Err(BlockCipherModeError::InvalidIvLength);
     }
-    if input.len() % block_size != 0 {
+    if !input.len().is_multiple_of(block_size) {
         return Err(BlockCipherModeError::InvalidDataLength);
     }
     let mut previous = iv.to_vec();
@@ -246,7 +246,7 @@ pub fn key_wrap_with<E>(
         return Err(KeyWrapError::InvalidInitialValue);
     }
     if encrypting {
-        if input.len() < AES_BLOCK_SIZE || input.len() % KEY_WRAP_SEMIBLOCK_SIZE != 0 {
+        if input.len() < AES_BLOCK_SIZE || !input.len().is_multiple_of(KEY_WRAP_SEMIBLOCK_SIZE) {
             return Err(KeyWrapError::InvalidDataLength);
         }
         let a = initial_value
@@ -258,7 +258,7 @@ pub fn key_wrap_with<E>(
         return Ok(output);
     }
     if input.len() < AES_BLOCK_SIZE + KEY_WRAP_SEMIBLOCK_SIZE
-        || input.len() % KEY_WRAP_SEMIBLOCK_SIZE != 0
+        || !input.len().is_multiple_of(KEY_WRAP_SEMIBLOCK_SIZE)
     {
         return Err(KeyWrapError::InvalidDataLength);
     }
@@ -310,7 +310,7 @@ pub fn key_wrap_with_padding_with<E>(
         output.extend_from_slice(&r);
         return Ok(output);
     }
-    if input.len() < AES_BLOCK_SIZE || input.len() % KEY_WRAP_SEMIBLOCK_SIZE != 0 {
+    if input.len() < AES_BLOCK_SIZE || !input.len().is_multiple_of(KEY_WRAP_SEMIBLOCK_SIZE) {
         return Err(KeyWrapError::InvalidDataLength);
     }
     let semiblocks = input.len() / KEY_WRAP_SEMIBLOCK_SIZE - 1;
@@ -376,7 +376,7 @@ pub fn cmac_with<E>(
         return Err(BlockCipherModeError::InvalidBlockOutput);
     }
     let subkey = cmac_double(encrypted_zero);
-    let complete = !data.is_empty() && data.len() % block_size == 0;
+    let complete = !data.is_empty() && data.len().is_multiple_of(block_size);
     let last_subkey = if complete {
         subkey
     } else {
@@ -599,7 +599,7 @@ fn increment_gcm_counter(counter: &mut [u8; AES_BLOCK_SIZE]) {
 fn gcm_tag(full_tag: [u8; AES_BLOCK_SIZE], tag_bits: usize) -> Vec<u8> {
     let tag_length = tag_bits.div_ceil(8);
     let mut tag = full_tag[..tag_length].to_vec();
-    if tag_bits % 8 != 0 {
+    if !tag_bits.is_multiple_of(8) {
         let mask = 0xff << (8 - tag_bits % 8);
         if let Some(last) = tag.last_mut() {
             *last &= mask;
@@ -945,12 +945,12 @@ fn transform_ecb(
     input: &[u8],
     encrypt: bool,
 ) -> Result<Vec<u8>, SoftwareSymmetricError> {
-    if input.len() % AES_BLOCK_SIZE != 0 {
+    if !input.len().is_multiple_of(AES_BLOCK_SIZE) {
         return Err(SoftwareSymmetricError::InvalidDataLength);
     }
     let cipher = AesCipher::new(key)?;
     let mut output = input.to_vec();
-    for chunk in output.chunks_exact_mut(AES_BLOCK_SIZE) {
+    for chunk in output.as_chunks_mut::<AES_BLOCK_SIZE>().0 {
         let block = GenericArray::from_mut_slice(chunk);
         if encrypt {
             cipher.encrypt_block(block);
@@ -1023,13 +1023,13 @@ fn crypt_tdes_ecb(
     if key.len() != 24 {
         return Err(SoftwareSymmetricError::InvalidKeyLength);
     }
-    if input.len() % TDES_BLOCK_SIZE != 0 {
+    if !input.len().is_multiple_of(TDES_BLOCK_SIZE) {
         return Err(SoftwareSymmetricError::InvalidDataLength);
     }
     let cipher =
         TdesEde3::new_from_slice(key).map_err(|_| SoftwareSymmetricError::InvalidKeyLength)?;
     let mut output = input.to_vec();
-    for chunk in output.chunks_exact_mut(TDES_BLOCK_SIZE) {
+    for chunk in output.as_chunks_mut::<TDES_BLOCK_SIZE>().0 {
         let block = des::cipher::Block::<TdesEde3>::from_mut_slice(chunk);
         if encrypting {
             cipher.encrypt_block(block);
@@ -1532,7 +1532,9 @@ mod tests {
     fn hex(value: &str) -> Vec<u8> {
         value
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let high = (pair[0] as char).to_digit(16).unwrap();
                 let low = (pair[1] as char).to_digit(16).unwrap();
