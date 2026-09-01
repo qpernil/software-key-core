@@ -127,16 +127,20 @@ pub enum EcCurve {
     BrainpoolP512,
 }
 
-const fn ec_signature_scheme(curve: EcCurve) -> SignatureScheme {
-    match curve {
-        EcCurve::P224 => SignatureScheme::EcdsaP224Sha224,
-        EcCurve::P256 => SignatureScheme::EcdsaP256Sha256,
-        EcCurve::P384 => SignatureScheme::EcdsaP384Sha384,
-        EcCurve::P521 => SignatureScheme::EcdsaP521Sha512,
-        EcCurve::Secp256k1 => SignatureScheme::EcdsaSecp256k1Sha256,
-        EcCurve::BrainpoolP256 => SignatureScheme::EcdsaBrainpoolP256Sha256,
-        EcCurve::BrainpoolP384 => SignatureScheme::EcdsaBrainpoolP384Sha384,
-        EcCurve::BrainpoolP512 => SignatureScheme::EcdsaBrainpoolP512Sha512,
+impl EcCurve {
+    /// Return the signature scheme supported for this curve by the shared
+    /// software implementation.
+    pub const fn signature_scheme(self) -> SignatureScheme {
+        match self {
+            Self::P224 => SignatureScheme::EcdsaP224Sha224,
+            Self::P256 => SignatureScheme::EcdsaP256Sha256,
+            Self::P384 => SignatureScheme::EcdsaP384Sha384,
+            Self::P521 => SignatureScheme::EcdsaP521Sha512,
+            Self::Secp256k1 => SignatureScheme::EcdsaSecp256k1Sha256,
+            Self::BrainpoolP256 => SignatureScheme::EcdsaBrainpoolP256Sha256,
+            Self::BrainpoolP384 => SignatureScheme::EcdsaBrainpoolP384Sha384,
+            Self::BrainpoolP512 => SignatureScheme::EcdsaBrainpoolP512Sha512,
+        }
     }
 }
 
@@ -837,7 +841,7 @@ impl SoftwareSigningKey {
         serialized: &[u8],
     ) -> Result<Self, SoftwareSigningError> {
         let key = match kind {
-            KeyKind::Ec(curve) => Self::from_pkcs8_der(ec_signature_scheme(curve), serialized)?,
+            KeyKind::Ec(curve) => Self::from_pkcs8_der(curve.signature_scheme(), serialized)?,
             KeyKind::Ed25519 => Self::from_pkcs8_der(SignatureScheme::Ed25519, serialized)?,
             KeyKind::Rsa { modulus_bits } => {
                 let key = Self::from_pkcs8_der(SignatureScheme::RsaPssSha256, serialized)?;
@@ -926,7 +930,7 @@ impl SoftwareSigningKey {
     /// Generate a private key without selecting a signing operation.
     pub fn generate_for_kind(kind: KeyKind) -> Result<Self, SoftwareSigningError> {
         match kind {
-            KeyKind::Ec(curve) => Self::generate(ec_signature_scheme(curve)),
+            KeyKind::Ec(curve) => Self::generate(curve.signature_scheme()),
             KeyKind::Ed25519 => Self::generate(SignatureScheme::Ed25519),
             KeyKind::Rsa { modulus_bits } => Self::generate_rsa(modulus_bits),
             KeyKind::MlDsa(parameter_set) => Self::generate(SignatureScheme::MlDsa(parameter_set)),
@@ -1026,7 +1030,7 @@ impl SoftwareSigningKey {
         serialized: &[u8],
     ) -> Result<Self, SoftwareSigningError> {
         let key = match kind {
-            KeyKind::Ec(curve) => Self::from_serialized(ec_signature_scheme(curve), serialized)?,
+            KeyKind::Ec(curve) => Self::from_serialized(curve.signature_scheme(), serialized)?,
             KeyKind::Ed25519 => Self::from_serialized(SignatureScheme::Ed25519, serialized)?,
             KeyKind::Rsa { modulus_bits } => {
                 let key = Self::from_serialized(SignatureScheme::RsaPssSha256, serialized)?;
