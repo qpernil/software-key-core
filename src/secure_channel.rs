@@ -137,7 +137,7 @@ pub fn yubico_password_p256_key(
         *input.last_mut().unwrap() = counter;
         let private = yubico_password_kdf(&input);
         if let Ok(key) = crate::software_signing::SoftwareSigningKey::from_serialized(
-            crate::software_signing::SoftwareSigningAlgorithm::EcdsaP256Sha256,
+            crate::software_signing::SignatureScheme::EcdsaP256Sha256,
             private.as_slice(),
         ) {
             return Ok(key);

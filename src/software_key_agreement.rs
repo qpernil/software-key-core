@@ -11,7 +11,7 @@ use p256::elliptic_curve::{
 };
 use std::fmt;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519SecretKey};
-use zeroize::Zeroizing;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SoftwareKeyAgreementError {
@@ -25,6 +25,9 @@ pub enum SoftwareKeyAgreementError {
 /// A persistent X25519 private key.
 #[derive(Clone)]
 pub struct SoftwareX25519Key(X25519SecretKey);
+
+// `x25519_dalek::StaticSecret` clears its scalar on drop.
+impl ZeroizeOnDrop for SoftwareX25519Key {}
 
 impl fmt::Debug for SoftwareX25519Key {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -127,19 +130,19 @@ pub fn derive_with_signing_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::software_signing::{SoftwarePublicKey, SoftwareSigningAlgorithm};
+    use crate::software_signing::{SignatureScheme, SoftwarePublicKey};
 
     #[test]
     fn every_shared_weierstrass_curve_agrees() {
         for algorithm in [
-            SoftwareSigningAlgorithm::EcdsaP224Sha224,
-            SoftwareSigningAlgorithm::EcdsaP256Sha256,
-            SoftwareSigningAlgorithm::EcdsaP384Sha384,
-            SoftwareSigningAlgorithm::EcdsaP521Sha512,
-            SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
-            SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256,
-            SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384,
-            SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512,
+            SignatureScheme::EcdsaP224Sha224,
+            SignatureScheme::EcdsaP256Sha256,
+            SignatureScheme::EcdsaP384Sha384,
+            SignatureScheme::EcdsaP521Sha512,
+            SignatureScheme::EcdsaSecp256k1Sha256,
+            SignatureScheme::EcdsaBrainpoolP256Sha256,
+            SignatureScheme::EcdsaBrainpoolP384Sha384,
+            SignatureScheme::EcdsaBrainpoolP512Sha512,
         ] {
             let first = SoftwareSigningKey::generate(algorithm).unwrap();
             let second = SoftwareSigningKey::generate(algorithm).unwrap();
@@ -198,13 +201,13 @@ mod tests {
             Err(SoftwareKeyAgreementError::InvalidPrivateKey)
         ));
 
-        let p256 = SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256).unwrap();
+        let p256 = SoftwareSigningKey::generate(SignatureScheme::EcdsaP256Sha256).unwrap();
         assert_eq!(
             derive_with_signing_key(&p256, &[4, 1, 2, 3]),
             Err(SoftwareKeyAgreementError::InvalidPublicKey)
         );
 
-        let ed25519 = SoftwareSigningKey::generate(SoftwareSigningAlgorithm::Ed25519).unwrap();
+        let ed25519 = SoftwareSigningKey::generate(SignatureScheme::Ed25519).unwrap();
         assert_eq!(
             derive_with_signing_key(&ed25519, &[0; 32]),
             Err(SoftwareKeyAgreementError::AlgorithmMismatch)

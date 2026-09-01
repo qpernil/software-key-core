@@ -24,6 +24,16 @@ P-224/P-256/P-384/P-521, secp256k1, and Brainpool P-256/P-384/P-512. Classical
 asymmetric keys also support PKCS#8 import/export at protocol boundaries such
 as YubiHSM RSA-AES key wrapping.
 
+Private-key identity and operations are separate in the API. `KeyKind`
+selects what is generated or restored, including the RSA modulus size, while
+`SignatureScheme` selects the digest and padding used by one operation. Runtime
+owners retain parsed keys: RSA CRT precomputation, Ed25519 expansion, EC public
+derivation, X25519 setup, and ML-DSA/ML-KEM expansion happen when a key crosses
+the generation/import/restore boundary rather than for every command. Compact
+seeds, scalars, RSA components, and PKCS#8 are boundary representations only.
+All typed private-key wrappers guarantee zeroization on drop, and exported
+private bytes are returned in zeroizing buffers.
+
 It does not own protocol identifiers or encodings, PKCS #11 types, device
 authorization, object lifecycle, persistence, transport framing, session
 state, or protocol-specific error mapping. In particular, ARKG COSE/CBOR stays
