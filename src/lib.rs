@@ -13,6 +13,7 @@ pub mod post_quantum;
 pub mod rsa_signing;
 pub mod secure_channel;
 pub mod software_key_agreement;
+pub mod software_private_key;
 pub mod software_signing;
 pub mod software_symmetric;
 
@@ -21,6 +22,7 @@ mod zeroization_tests {
     use super::{
         post_quantum::{MlDsaPrivateKey, MlKemPrivateKey},
         software_key_agreement::SoftwareX25519Key,
+        software_private_key::SoftwarePrivateKey,
         software_signing::SoftwareSigningKey,
     };
     use zeroize::ZeroizeOnDrop;
@@ -33,5 +35,6 @@ mod zeroization_tests {
         assert_zeroize_on_drop::<SoftwareX25519Key>();
         assert_zeroize_on_drop::<MlDsaPrivateKey>();
         assert_zeroize_on_drop::<MlKemPrivateKey>();
+        assert_zeroize_on_drop::<SoftwarePrivateKey>();
     }
 }
