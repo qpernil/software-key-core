@@ -7,7 +7,7 @@
 use ::ml_dsa::{EncodedVerifyingKey, MlDsa44, MlDsa65, MlDsa87, Seed, Signature, SigningKey};
 use signature::Keypair;
 use std::fmt;
-use zeroize::Zeroizing;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MlKemParameterSet {
@@ -59,6 +59,9 @@ pub enum MlKemPrivateKey {
     MlKem768(::ml_kem::DecapsulationKey<::ml_kem::MlKem768>),
     MlKem1024(::ml_kem::DecapsulationKey<::ml_kem::MlKem1024>),
 }
+
+// The `ml-kem` dependency is compiled with its `zeroize` feature.
+impl ZeroizeOnDrop for MlKemPrivateKey {}
 
 impl fmt::Debug for MlKemPrivateKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -311,6 +314,9 @@ pub enum MlDsaPrivateKey {
     MlDsa65(SigningKey<MlDsa65>),
     MlDsa87(SigningKey<MlDsa87>),
 }
+
+// The `ml-dsa` dependency is compiled with its `zeroize` feature.
+impl ZeroizeOnDrop for MlDsaPrivateKey {}
 
 impl fmt::Debug for MlDsaPrivateKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

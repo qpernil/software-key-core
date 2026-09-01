@@ -15,3 +15,23 @@ pub mod secure_channel;
 pub mod software_key_agreement;
 pub mod software_signing;
 pub mod software_symmetric;
+
+#[cfg(test)]
+mod zeroization_tests {
+    use super::{
+        post_quantum::{MlDsaPrivateKey, MlKemPrivateKey},
+        software_key_agreement::SoftwareX25519Key,
+        software_signing::SoftwareSigningKey,
+    };
+    use zeroize::ZeroizeOnDrop;
+
+    fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+    #[test]
+    fn every_typed_private_key_wrapper_guarantees_zeroization_on_drop() {
+        assert_zeroize_on_drop::<SoftwareSigningKey>();
+        assert_zeroize_on_drop::<SoftwareX25519Key>();
+        assert_zeroize_on_drop::<MlDsaPrivateKey>();
+        assert_zeroize_on_drop::<MlKemPrivateKey>();
+    }
+}
