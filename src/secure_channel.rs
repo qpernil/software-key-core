@@ -3,7 +3,7 @@
 //! This module owns cryptographic transforms and KDFs. Callers still own the
 //! wire protocol, role-specific state machine, counters, policy, and errors.
 
-use crate::software_symmetric::{aes_cmac, SoftwareSymmetricError, AES_BLOCK_SIZE};
+use crate::software_symmetric::{AES_BLOCK_SIZE, SoftwareSymmetricError, aes_cmac};
 use pbkdf2::pbkdf2_hmac;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -52,7 +52,7 @@ pub fn scp03_kdf(
     context: &[u8],
     output_bits: u16,
 ) -> Result<Vec<u8>, SecureChannelCryptoError> {
-    if output_bits == 0 || output_bits % 8 != 0 {
+    if output_bits == 0 || !output_bits.is_multiple_of(8) {
         return Err(SecureChannelCryptoError::InvalidDataLength);
     }
     let output_length = usize::from(output_bits / 8);
@@ -234,7 +234,9 @@ mod tests {
     fn hex(value: &str) -> Vec<u8> {
         value
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let high = (pair[0] as char).to_digit(16).unwrap();
                 let low = (pair[1] as char).to_digit(16).unwrap();

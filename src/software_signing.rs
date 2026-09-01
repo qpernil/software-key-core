@@ -8,31 +8,31 @@
 
 use crate::{
     brainpool512::{BrainpoolP512r1, SecretKey as BrainpoolP512SecretKey},
-    post_quantum::{validate_ml_dsa_public_key, verify_ml_dsa, MlDsaParameterSet, MlDsaPrivateKey},
+    post_quantum::{MlDsaParameterSet, MlDsaPrivateKey, validate_ml_dsa_public_key, verify_ml_dsa},
     rsa_signing::{
-        rsa_decrypt_oaep_digest, rsa_decrypt_pkcs1v15, rsa_encrypt_oaep_digest,
-        rsa_encrypt_pkcs1v15, rsa_sign_pkcs1v15_digest, rsa_sign_pkcs1v15_payload,
-        rsa_sign_pss_digest, rsa_sign_raw, rsa_verify_pkcs1v15_digest, rsa_verify_pss_digest,
-        rsa_verify_raw, RsaConstructionError, RsaHashAlgorithm, RsaPssParameters,
+        RsaConstructionError, RsaHashAlgorithm, RsaPssParameters, rsa_decrypt_oaep_digest,
+        rsa_decrypt_pkcs1v15, rsa_encrypt_oaep_digest, rsa_encrypt_pkcs1v15,
+        rsa_sign_pkcs1v15_digest, rsa_sign_pkcs1v15_payload, rsa_sign_pss_digest, rsa_sign_raw,
+        rsa_verify_pkcs1v15_digest, rsa_verify_pss_digest, rsa_verify_raw,
     },
 };
 use bp256::r1::SecretKey as BrainpoolP256SecretKey;
 use bp384::r1::SecretKey as BrainpoolP384SecretKey;
-use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use ed448_goldilocks::SigningKey as Ed448SigningKey;
+use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use elliptic_curve::pkcs8::{
     DecodePrivateKey as DecodeEcPrivateKey, EncodePrivateKey as EncodeEcPrivateKey,
 };
-use k256::ecdsa::SigningKey as K256SigningKey;
 use k256::SecretKey as K256SecretKey;
+use k256::ecdsa::SigningKey as K256SigningKey;
 use p224::SecretKey as P224SecretKey;
+use p256::SecretKey as P256SecretKey;
 use p256::ecdsa::SigningKey as P256SigningKey;
 use p256::elliptic_curve::sec1::ToSec1Point;
-use p256::SecretKey as P256SecretKey;
-use p384::ecdsa::SigningKey as P384SigningKey;
 use p384::SecretKey as P384SecretKey;
-use p521::ecdsa::SigningKey as P521SigningKey;
+use p384::ecdsa::SigningKey as P384SigningKey;
 use p521::SecretKey as P521SecretKey;
+use p521::ecdsa::SigningKey as P521SigningKey;
 use rsa::pkcs8::{
     DecodePrivateKey as DecodeRsaPrivateKey, EncodePrivateKey as EncodeRsaPrivateKey,
 };
@@ -1819,7 +1819,9 @@ mod tests {
     fn hex(encoded: &str) -> Vec<u8> {
         encoded
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let digit = |value: u8| match value {
                     b'0'..=b'9' => value - b'0',

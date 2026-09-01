@@ -4,7 +4,7 @@
 //! operations, PKCS #1 v1.5 signature padding and DigestInfo values, and
 //! RSASSA-PSS encoding with independent message and MGF1 hash algorithms.
 
-use rsa::{traits::PublicKeyParts, BigUint, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
+use rsa::{BigUint, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey, traits::PublicKeyParts};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, ConstantTimeGreater};
 
 pub use crate::digest::HashAlgorithm as RsaHashAlgorithm;

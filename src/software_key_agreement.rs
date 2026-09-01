@@ -6,12 +6,12 @@
 
 use crate::software_signing::{EcKeyBackend, SoftwareSigningKey};
 use p256::elliptic_curve::{
-    sec1::{FromSec1Point, ModulusSize, ToSec1Point},
     AffinePoint, CurveArithmetic, FieldBytesSize, PublicKey, SecretKey,
+    sec1::{FromSec1Point, ModulusSize, ToSec1Point},
 };
 use std::fmt;
-use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519SecretKey};
 use x448::{PublicKey as X448PublicKey, StaticSecret as X448SecretKey};
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519SecretKey};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -210,7 +210,9 @@ mod tests {
     fn hex(encoded: &str) -> Vec<u8> {
         encoded
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let digit = |value: u8| match value {
                     b'0'..=b'9' => value - b'0',
