@@ -1,16 +1,17 @@
 //! Protocol-neutral static software key agreement.
 //!
-//! This module owns raw ECDH and X25519 operations. Protocol layers retain
+//! This module owns raw ECDH, X25519, and X448 operations. Protocol layers retain
 //! responsibility for algorithm identifiers, public-key containers, KDFs,
 //! authorization policy, persistence, and error mapping.
 
-use crate::software_signing::SoftwareSigningKey;
+use crate::software_signing::{EcKeyBackend, SoftwareSigningKey};
 use p256::elliptic_curve::{
     sec1::{FromSec1Point, ModulusSize, ToSec1Point},
     AffinePoint, CurveArithmetic, FieldBytesSize, PublicKey, SecretKey,
 };
 use std::fmt;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519SecretKey};
+use x448::{PublicKey as X448PublicKey, StaticSecret as X448SecretKey};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,49 +23,110 @@ pub enum SoftwareKeyAgreementError {
     RandomnessUnavailable,
 }
 
-/// A persistent X25519 private key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MontgomeryCurve {
+    X25519,
+    X448,
+}
+
 #[derive(Clone)]
-pub struct SoftwareX25519Key(X25519SecretKey);
+enum MontgomeryKeyBackend {
+    Curve25519(X25519SecretKey),
+    Curve448(X448SecretKey),
+}
 
-// `x25519_dalek::StaticSecret` clears its scalar on drop.
-impl ZeroizeOnDrop for SoftwareX25519Key {}
+/// A persistent Montgomery-curve private key. Concrete crypto implementations
+/// remain encapsulated so callers model the curve rather than a library type.
+#[derive(Clone)]
+pub struct SoftwareMontgomeryKey(MontgomeryKeyBackend);
 
-impl fmt::Debug for SoftwareX25519Key {
+// Both contained static-secret implementations clear their scalar on drop.
+impl ZeroizeOnDrop for SoftwareMontgomeryKey {}
+
+impl fmt::Debug for SoftwareMontgomeryKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("SoftwareX25519Key")
+            .debug_struct("SoftwareMontgomeryKey")
+            .field("curve", &self.curve())
             .finish_non_exhaustive()
     }
 }
 
-impl SoftwareX25519Key {
-    pub fn generate() -> Result<Self, SoftwareKeyAgreementError> {
-        let mut seed = Zeroizing::new([0_u8; 32]);
-        getrandom::fill(seed.as_mut())
-            .map_err(|_| SoftwareKeyAgreementError::RandomnessUnavailable)?;
-        Ok(Self(X25519SecretKey::from(*seed)))
+impl SoftwareMontgomeryKey {
+    pub fn generate(curve: MontgomeryCurve) -> Result<Self, SoftwareKeyAgreementError> {
+        match curve {
+            MontgomeryCurve::X25519 => {
+                let mut seed = Zeroizing::new([0_u8; 32]);
+                getrandom::fill(seed.as_mut())
+                    .map_err(|_| SoftwareKeyAgreementError::RandomnessUnavailable)?;
+                Ok(Self(MontgomeryKeyBackend::Curve25519(
+                    X25519SecretKey::from(*seed),
+                )))
+            }
+            MontgomeryCurve::X448 => {
+                let mut seed = Zeroizing::new([0_u8; 56]);
+                getrandom::fill(seed.as_mut())
+                    .map_err(|_| SoftwareKeyAgreementError::RandomnessUnavailable)?;
+                Ok(Self(MontgomeryKeyBackend::Curve448(X448SecretKey::from(
+                    *seed,
+                ))))
+            }
+        }
     }
 
-    pub fn from_serialized(serialized: &[u8]) -> Result<Self, SoftwareKeyAgreementError> {
-        let seed: [u8; 32] = serialized
-            .try_into()
-            .map_err(|_| SoftwareKeyAgreementError::InvalidPrivateKey)?;
-        Ok(Self(X25519SecretKey::from(seed)))
+    pub fn from_serialized(
+        curve: MontgomeryCurve,
+        serialized: &[u8],
+    ) -> Result<Self, SoftwareKeyAgreementError> {
+        match curve {
+            MontgomeryCurve::X25519 => {
+                let seed: [u8; 32] = serialized
+                    .try_into()
+                    .map_err(|_| SoftwareKeyAgreementError::InvalidPrivateKey)?;
+                Ok(Self(MontgomeryKeyBackend::Curve25519(
+                    X25519SecretKey::from(seed),
+                )))
+            }
+            MontgomeryCurve::X448 => {
+                let seed: [u8; 56] = serialized
+                    .try_into()
+                    .map_err(|_| SoftwareKeyAgreementError::InvalidPrivateKey)?;
+                Ok(Self(MontgomeryKeyBackend::Curve448(X448SecretKey::from(
+                    seed,
+                ))))
+            }
+        }
+    }
+
+    pub const fn curve(&self) -> MontgomeryCurve {
+        match &self.0 {
+            MontgomeryKeyBackend::Curve25519(_) => MontgomeryCurve::X25519,
+            MontgomeryKeyBackend::Curve448(_) => MontgomeryCurve::X448,
+        }
     }
 
     pub fn serialized(&self) -> Zeroizing<Vec<u8>> {
-        Zeroizing::new(self.0.to_bytes().to_vec())
+        Zeroizing::new(match &self.0 {
+            MontgomeryKeyBackend::Curve25519(key) => key.to_bytes().to_vec(),
+            MontgomeryKeyBackend::Curve448(key) => key.as_bytes().to_vec(),
+        })
     }
 
-    pub fn public_key(&self) -> [u8; 32] {
-        X25519PublicKey::from(&self.0).to_bytes()
+    pub fn public_key(&self) -> Vec<u8> {
+        match &self.0 {
+            MontgomeryKeyBackend::Curve25519(key) => X25519PublicKey::from(key).to_bytes().to_vec(),
+            MontgomeryKeyBackend::Curve448(key) => X448PublicKey::from(key).as_bytes().to_vec(),
+        }
     }
 
     pub fn derive(
         &self,
         peer_public_key: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, SoftwareKeyAgreementError> {
-        derive_x25519(&self.0, peer_public_key)
+        match &self.0 {
+            MontgomeryKeyBackend::Curve25519(key) => derive_x25519(key, peer_public_key),
+            MontgomeryKeyBackend::Curve448(key) => derive_x448(key, peer_public_key),
+        }
     }
 }
 
@@ -81,6 +143,17 @@ pub fn derive_x25519(
         return Err(SoftwareKeyAgreementError::NonContributoryPublicKey);
     }
     Ok(Zeroizing::new(shared.to_bytes().to_vec()))
+}
+
+/// Perform raw X448 with an existing software private key.
+pub fn derive_x448(
+    private_key: &X448SecretKey,
+    peer_public_key: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, SoftwareKeyAgreementError> {
+    let peer = X448PublicKey::from_bytes(peer_public_key)
+        .ok_or(SoftwareKeyAgreementError::InvalidPublicKey)?;
+    let shared = private_key.diffie_hellman(&peer);
+    Ok(Zeroizing::new(shared.as_bytes().to_vec()))
 }
 
 /// Perform raw static ECDH for any RustCrypto short-Weierstrass curve.
@@ -113,15 +186,17 @@ pub fn derive_with_signing_key(
     peer_public_key: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, SoftwareKeyAgreementError> {
     match private_key {
-        SoftwareSigningKey::P224(key) => derive_weierstrass(key, peer_public_key),
-        SoftwareSigningKey::P256(key) => derive_weierstrass(key, peer_public_key),
-        SoftwareSigningKey::P384(key) => derive_weierstrass(key, peer_public_key),
-        SoftwareSigningKey::P521(key) => derive_weierstrass(key, peer_public_key),
-        SoftwareSigningKey::K256(key) => derive_weierstrass(key, peer_public_key),
-        SoftwareSigningKey::BrainpoolP256(key) => derive_weierstrass(key, peer_public_key),
-        SoftwareSigningKey::BrainpoolP384(key) => derive_weierstrass(key, peer_public_key),
-        SoftwareSigningKey::BrainpoolP512(key) => derive_weierstrass(key, peer_public_key),
-        SoftwareSigningKey::Ed25519(_)
+        SoftwareSigningKey::Ec(key) => match &key.0 {
+            EcKeyBackend::P224(key) => derive_weierstrass(key, peer_public_key),
+            EcKeyBackend::P256(key) => derive_weierstrass(key, peer_public_key),
+            EcKeyBackend::P384(key) => derive_weierstrass(key, peer_public_key),
+            EcKeyBackend::P521(key) => derive_weierstrass(key, peer_public_key),
+            EcKeyBackend::Secp256k1(key) => derive_weierstrass(key, peer_public_key),
+            EcKeyBackend::BrainpoolP256(key) => derive_weierstrass(key, peer_public_key),
+            EcKeyBackend::BrainpoolP384(key) => derive_weierstrass(key, peer_public_key),
+            EcKeyBackend::BrainpoolP512(key) => derive_weierstrass(key, peer_public_key),
+        },
+        SoftwareSigningKey::Edwards(_)
         | SoftwareSigningKey::Rsa(_)
         | SoftwareSigningKey::MlDsa(_) => Err(SoftwareKeyAgreementError::AlgorithmMismatch),
     }
@@ -131,6 +206,40 @@ pub fn derive_with_signing_key(
 mod tests {
     use super::*;
     use crate::software_signing::{SignatureScheme, SoftwarePublicKey};
+
+    fn hex(encoded: &str) -> Vec<u8> {
+        encoded
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digit = |value: u8| match value {
+                    b'0'..=b'9' => value - b'0',
+                    b'a'..=b'f' => value - b'a' + 10,
+                    b'A'..=b'F' => value - b'A' + 10,
+                    _ => panic!("invalid test-vector hex"),
+                };
+                digit(pair[0]) << 4 | digit(pair[1])
+            })
+            .collect()
+    }
+
+    #[test]
+    fn x448_matches_rfc_7748_known_answer() {
+        let scalar = hex(concat!(
+            "3d262fddf9ec8e88495266fea19a34d28882acef045104d0d1aae121",
+            "700a779c984c24f8cdd78fbff44943eba368f54b29259a4f1c600ad3"
+        ));
+        let peer = hex(concat!(
+            "06fce640fa3487bfda5f6cf2d5263f8aad88334cbd07437f020f08f9",
+            "814dc031ddbdc38c19c6da2583fa5429db94ada18aa7a7fb4ef8a086"
+        ));
+        let expected = hex(concat!(
+            "ce3e4ff95a60dc6697da1db1d85e6afbdf79b50a2412d7546d5f239f",
+            "e14fbaadeb445fc66a01b0779d98223961111e21766282f73dd96b6f"
+        ));
+        let key = SoftwareMontgomeryKey::from_serialized(MontgomeryCurve::X448, &scalar).unwrap();
+        assert_eq!(key.derive(&peer).unwrap().as_slice(), expected);
+    }
 
     #[test]
     fn every_shared_weierstrass_curve_agrees() {
@@ -168,22 +277,24 @@ mod tests {
     }
 
     #[test]
-    fn x25519_round_trips_and_agrees() {
-        let alice = SoftwareX25519Key::generate().unwrap();
-        let serialized = alice.serialized();
-        let restored = SoftwareX25519Key::from_serialized(&serialized).unwrap();
-        assert_eq!(restored.public_key(), alice.public_key());
+    fn montgomery_keys_round_trip_and_agree() {
+        for curve in [MontgomeryCurve::X25519, MontgomeryCurve::X448] {
+            let alice = SoftwareMontgomeryKey::generate(curve).unwrap();
+            let serialized = alice.serialized();
+            let restored = SoftwareMontgomeryKey::from_serialized(curve, &serialized).unwrap();
+            assert_eq!(restored.public_key(), alice.public_key());
 
-        let bob = SoftwareX25519Key::generate().unwrap();
-        assert_eq!(
-            restored.derive(&bob.public_key()).unwrap(),
-            bob.derive(&alice.public_key()).unwrap()
-        );
+            let bob = SoftwareMontgomeryKey::generate(curve).unwrap();
+            assert_eq!(
+                restored.derive(&bob.public_key()).unwrap(),
+                bob.derive(&alice.public_key()).unwrap()
+            );
+        }
     }
 
     #[test]
-    fn x25519_rejects_bad_and_noncontributory_peers() {
-        let key = SoftwareX25519Key::generate().unwrap();
+    fn montgomery_keys_reject_bad_and_noncontributory_peers() {
+        let key = SoftwareMontgomeryKey::generate(MontgomeryCurve::X25519).unwrap();
         assert_eq!(
             key.derive(&[1; 31]),
             Err(SoftwareKeyAgreementError::InvalidPublicKey)
@@ -192,12 +303,26 @@ mod tests {
             key.derive(&[0; 32]),
             Err(SoftwareKeyAgreementError::NonContributoryPublicKey)
         );
+
+        let key = SoftwareMontgomeryKey::generate(MontgomeryCurve::X448).unwrap();
+        assert_eq!(
+            key.derive(&[1; 55]),
+            Err(SoftwareKeyAgreementError::InvalidPublicKey)
+        );
+        assert_eq!(
+            key.derive(&[0; 56]),
+            Err(SoftwareKeyAgreementError::InvalidPublicKey)
+        );
     }
 
     #[test]
     fn agreement_rejects_invalid_private_keys_peers_and_key_kinds() {
         assert!(matches!(
-            SoftwareX25519Key::from_serialized(&[0; 31]),
+            SoftwareMontgomeryKey::from_serialized(MontgomeryCurve::X25519, &[0; 31]),
+            Err(SoftwareKeyAgreementError::InvalidPrivateKey)
+        ));
+        assert!(matches!(
+            SoftwareMontgomeryKey::from_serialized(MontgomeryCurve::X448, &[0; 55]),
             Err(SoftwareKeyAgreementError::InvalidPrivateKey)
         ));
 
