@@ -21,7 +21,7 @@ pub mod software_symmetric;
 mod zeroization_tests {
     use super::{
         post_quantum::{MlDsaPrivateKey, MlKemPrivateKey},
-        software_key_agreement::SoftwareX25519Key,
+        software_key_agreement::SoftwareMontgomeryKey,
         software_private_key::SoftwarePrivateKey,
         software_signing::SoftwareSigningKey,
     };
@@ -32,7 +32,7 @@ mod zeroization_tests {
     #[test]
     fn every_typed_private_key_wrapper_guarantees_zeroization_on_drop() {
         assert_zeroize_on_drop::<SoftwareSigningKey>();
-        assert_zeroize_on_drop::<SoftwareX25519Key>();
+        assert_zeroize_on_drop::<SoftwareMontgomeryKey>();
         assert_zeroize_on_drop::<MlDsaPrivateKey>();
         assert_zeroize_on_drop::<MlKemPrivateKey>();
         assert_zeroize_on_drop::<SoftwarePrivateKey>();
