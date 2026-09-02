@@ -206,6 +206,7 @@ macro_rules! verify_ecdsa {
             .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
         let signature = $ec::ecdsa::Signature::from_slice($signature)
             .map_err(|_| SoftwareSigningError::InvalidSignature)?;
+        let signature = signature.normalize_s();
         key.verify($message, &signature)
             .map_err(|_| SoftwareSigningError::InvalidSignature)
     }};
@@ -217,6 +218,7 @@ macro_rules! verify_ecdsa_prehash {
             .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
         let signature = $ec::ecdsa::Signature::from_slice($signature)
             .map_err(|_| SoftwareSigningError::InvalidSignature)?;
+        let signature = signature.normalize_s();
         key.verify_prehash($prehash, &signature)
             .map_err(|_| SoftwareSigningError::InvalidSignature)
     }};
@@ -228,6 +230,7 @@ macro_rules! verify_generic_ecdsa {
             .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
         let signature = ecdsa::Signature::<$curve>::from_slice($signature)
             .map_err(|_| SoftwareSigningError::InvalidSignature)?;
+        let signature = signature.normalize_s();
         key.verify($message, &signature)
             .map_err(|_| SoftwareSigningError::InvalidSignature)
     }};
@@ -239,6 +242,7 @@ macro_rules! verify_generic_ecdsa_prehash {
             .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
         let signature = ecdsa::Signature::<$curve>::from_slice($signature)
             .map_err(|_| SoftwareSigningError::InvalidSignature)?;
+        let signature = signature.normalize_s();
         key.verify_prehash($prehash, &signature)
             .map_err(|_| SoftwareSigningError::InvalidSignature)
     }};
@@ -1972,6 +1976,25 @@ mod tests {
                 Err(SoftwareSigningError::InvalidSignature)
             );
         }
+    }
+
+    #[test]
+    fn secp256k1_verification_accepts_equivalent_high_s_signatures() {
+        let algorithm = SignatureScheme::EcdsaSecp256k1Sha256;
+        let key = SoftwareSigningKey::generate(algorithm).unwrap();
+        let public_key = key.public_key();
+        let prehash = Sha256::digest(b"high-S verification regression");
+        let signature = key.sign_prehash(algorithm, &prehash).unwrap();
+        let signature = k256::ecdsa::Signature::from_slice(signature.as_bytes())
+            .unwrap()
+            .normalize_s();
+        let (r, s) = signature.split_scalars();
+        let high_s = k256::ecdsa::Signature::from_scalars(r.to_bytes(), (-s).to_bytes()).unwrap();
+
+        assert_ne!(signature.to_bytes(), high_s.to_bytes());
+        public_key
+            .verify_prehash(algorithm, &prehash, &high_s.to_bytes())
+            .unwrap();
     }
 
     #[test]
