@@ -8,7 +8,16 @@ readme = "README.md"
 license = "MIT OR Apache-2.0"
 publish = false
 
+[features]
+x509 = ["dep:const-oid", "dep:der", "dep:spki", "dep:x509-cert", "dep:rustls-pki-types", "dep:webpki"]
+
 [dependencies]
+const-oid = { version = "0.10.2", optional = true }
+der = { version = "0.8.1", features = ["alloc", "derive", "std"], optional = true }
+spki = { version = "0.8.0", features = ["alloc", "std"], optional = true }
+x509-cert = { version = "0.3.0", default-features = false, features = ["std"], optional = true }
+rustls-pki-types = { version = "1.15.1", optional = true }
+webpki = { package = "rustls-webpki", version = "0.103.13", features = ["ring", "std"], optional = true }
 aes = "0.8.4"
 aes-kw = { version = "0.3.1", default-features = false }
 bp256 = { version = "=0.14.0-rc.15", default-features = false, features = ["arithmetic", "ecdsa", "pkcs8", "sha256", "std"] }

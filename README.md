@@ -24,6 +24,11 @@ P-224/P-256/P-384/P-521, secp256k1, and Brainpool P-256/P-384/P-512. Classical
 asymmetric keys also support PKCS#8 import/export at protocol boundaries such
 as YubiHSM RSA-AES key wrapping.
 
+The optional `x509` feature provides strict certificate parsing, signature
+verification, and certificate-chain validation. Trust is supplied explicitly as
+CA certificates or a P-256 CA public key; presented certificates never become
+anchors. Providers retain their trust-selection and authorization policy.
+
 Private-key identity and operations are separate in the API. `KeyKind`
 selects what is generated or restored, including the RSA modulus size, while
 `SignatureScheme` selects the digest and padding used by one operation. Runtime
