@@ -1,13 +1,16 @@
 //! Protocol-neutral software key operations.
 //!
 //! This crate provides reusable key generation, signing, verification, and key
-//! agreement without depending on a device protocol or provider API. Protocol
+//! agreement without depending on a device protocol or provider API. The optional
+//! x509 feature provides certificate parsing and explicit-anchor chain validation. Protocol
 //! and provider layers retain responsibility for identifiers, public-key
 //! containers, signature encodings, authorization policy, persistence, and
 //! error mapping.
 
 pub mod arkg;
 pub mod brainpool512;
+#[cfg(feature = "x509")]
+pub mod certificate_chain;
 pub mod digest;
 pub mod post_quantum;
 pub mod rsa_signing;
