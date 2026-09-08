@@ -11,6 +11,7 @@ pub mod arkg;
 pub mod brainpool512;
 #[cfg(feature = "x509")]
 pub mod certificate_chain;
+pub mod counter_kdf;
 pub mod digest;
 pub mod post_quantum;
 pub mod rsa_signing;
