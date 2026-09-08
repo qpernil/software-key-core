@@ -24,6 +24,19 @@ P-224/P-256/P-384/P-521, secp256k1, and Brainpool P-256/P-384/P-512. Classical
 asymmetric keys also support PKCS#8 import/export at protocol boundaries such
 as YubiHSM RSA-AES key wrapping.
 
+The `counter_kdf` module supplies a single-output SP 800-108 AES-CMAC counter
+KDF with caller-ordered byte arrays, one iteration counter, and an optional
+encoded output length. It supports AES-128/192/256 base keys, byte-aligned
+8–32-bit counters, 8–64-bit length fields, both byte orders, and requested-key
+or generated-segment length accounting. Results and working buffers use
+zeroizing storage. `cmac_counter_kdf_with` accepts a fallible CMAC operation,
+allowing hardware key handles without exporting their values. The byte-key
+convenience function uses the same engine. All fields are validated before
+invoking CMAC; callback failures discard partial output and propagate to the
+caller. The caller retains output-size limits and object policy;
+PKCS #11 parameter parsing and permissions remain in pkcs11rs. Independent
+OpenSSL-CMAC vectors cover SCP03 layouts and multi-block truncation.
+
 The optional `x509` feature provides strict certificate parsing, signature
 verification, and certificate-chain validation. Trust is supplied explicitly as
 CA certificates or a P-256 CA public key; presented certificates never become
