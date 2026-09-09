@@ -40,7 +40,7 @@ use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use signature::hazmat::{PrehashSigner, PrehashVerifier};
 use signature::{Signer, Verifier};
-use std::fmt;
+use std::{fmt, sync::Arc};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// A signing operation, independent of how the private key was created or stored.
@@ -1152,12 +1152,12 @@ impl SoftwareEdwardsKey {
 pub enum SoftwareSigningKey {
     Ec(SoftwareEcKey),
     Edwards(Box<SoftwareEdwardsKey>),
-    Rsa(Box<RsaPrivateKey>),
+    Rsa(Arc<RsaPrivateKey>),
     MlDsa(MlDsaPrivateKey),
 }
 
 // Every contained private-key implementation is built with its zeroization
-// support enabled and clears its secret state on drop. Exposing the marker on
+// support enabled and clears its secret state on final-owner drop. The marker on
 // the protocol-neutral wrapper lets runtime object stores preserve that
 // guarantee without re-serializing the key.
 impl ZeroizeOnDrop for SoftwareSigningKey {}
@@ -1276,7 +1276,7 @@ impl SoftwareSigningKey {
                     .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
                 key.precompute()
                     .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
-                Ok(Self::Rsa(Box::new(key)))
+                Ok(Self::Rsa(Arc::new(key)))
             }
             SignatureScheme::MlDsa(parameter_set) => {
                 MlDsaPrivateKey::from_pkcs8_der(parameter_set, serialized)
@@ -1356,7 +1356,7 @@ impl SoftwareSigningKey {
                     .map_err(|_| SoftwareSigningError::RandomnessUnavailable)?;
                 key.precompute()
                     .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
-                Ok(Self::Rsa(Box::new(key)))
+                Ok(Self::Rsa(Arc::new(key)))
             }
             SignatureScheme::MlDsa(parameter_set) => MlDsaPrivateKey::generate(parameter_set)
                 .map(Self::MlDsa)
@@ -1380,7 +1380,7 @@ impl SoftwareSigningKey {
             .map_err(|_| SoftwareSigningError::RandomnessUnavailable)?;
         key.precompute()
             .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
-        Ok(Self::Rsa(Box::new(key)))
+        Ok(Self::Rsa(Arc::new(key)))
     }
 
     /// Reconstruct an RSA private key from its two primes and public exponent.
@@ -1397,7 +1397,7 @@ impl SoftwareSigningKey {
         .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
         key.precompute()
             .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
-        Ok(Self::Rsa(Box::new(key)))
+        Ok(Self::Rsa(Arc::new(key)))
     }
 
     pub fn from_serialized(
@@ -1438,7 +1438,7 @@ impl SoftwareSigningKey {
                     .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
                 key.precompute()
                     .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
-                Ok(Self::Rsa(Box::new(key)))
+                Ok(Self::Rsa(Arc::new(key)))
             }
             SignatureScheme::MlDsa(parameter_set) => {
                 MlDsaPrivateKey::from_seed_slice(parameter_set, serialized)
@@ -2011,6 +2011,39 @@ mod tests {
             .public_key()
             .verify_prehash(algorithm, &digest, signature.as_bytes())
             .unwrap();
+    }
+
+    #[test]
+    fn rsa_clones_share_precomputed_key_until_the_last_owner_drops() {
+        let original = SoftwareSigningKey::generate_rsa(1_024).unwrap();
+        let cloned = original.clone();
+        let (SoftwareSigningKey::Rsa(a), SoftwareSigningKey::Rsa(b)) = (&original, &cloned) else {
+            unreachable!();
+        };
+        assert!(Arc::ptr_eq(a, b));
+        let weak = Arc::downgrade(a);
+        let public = original.public_key();
+        let message = b"shared RSA key";
+        let ciphertext = public.encrypt_rsa_pkcs1v15(message).unwrap();
+        drop(original);
+        assert_eq!(weak.strong_count(), 1);
+        assert_eq!(
+            cloned.decrypt_rsa_pkcs1v15(&ciphertext).unwrap().as_slice(),
+            message
+        );
+        let digest = [0x5a; 32];
+        let signature = cloned
+            .sign_prehash(SignatureScheme::RsaPkcs1Sha256, &digest)
+            .unwrap();
+        public
+            .verify_prehash(
+                SignatureScheme::RsaPkcs1Sha256,
+                &digest,
+                signature.as_bytes(),
+            )
+            .unwrap();
+        drop(cloned);
+        assert!(weak.upgrade().is_none());
     }
 
     #[test]

@@ -5,8 +5,7 @@
 //! messages, contexts, and signatures so it can also be reused by `pkcs11rs`.
 
 use ::ml_dsa::{EncodedVerifyingKey, MlDsa44, MlDsa65, MlDsa87, Seed, Signature, SigningKey};
-use signature::Keypair;
-use std::fmt;
+use std::{fmt, sync::Arc};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,14 +52,15 @@ pub enum MlKemError {
     EncodingFailed,
 }
 
+/// An ML-KEM private key with immutable expanded state shared between handles.
 #[derive(Clone)]
 pub enum MlKemPrivateKey {
-    MlKem512(::ml_kem::DecapsulationKey<::ml_kem::MlKem512>),
-    MlKem768(::ml_kem::DecapsulationKey<::ml_kem::MlKem768>),
-    MlKem1024(::ml_kem::DecapsulationKey<::ml_kem::MlKem1024>),
+    MlKem512(Arc<::ml_kem::DecapsulationKey<::ml_kem::MlKem512>>),
+    MlKem768(Arc<::ml_kem::DecapsulationKey<::ml_kem::MlKem768>>),
+    MlKem1024(Arc<::ml_kem::DecapsulationKey<::ml_kem::MlKem1024>>),
 }
 
-// The `ml-kem` dependency is compiled with its `zeroize` feature.
+// The `ml-kem` dependency zeroizes the expanded key when its last owner drops.
 impl ZeroizeOnDrop for MlKemPrivateKey {}
 
 impl fmt::Debug for MlKemPrivateKey {
@@ -83,13 +83,13 @@ impl MlKemPrivateKey {
         let seed = ::ml_kem::Seed::from(seed);
         match parameter_set {
             MlKemParameterSet::MlKem512 => {
-                Self::MlKem512(::ml_kem::DecapsulationKey::from_seed(seed))
+                Self::MlKem512(Arc::new(::ml_kem::DecapsulationKey::from_seed(seed)))
             }
             MlKemParameterSet::MlKem768 => {
-                Self::MlKem768(::ml_kem::DecapsulationKey::from_seed(seed))
+                Self::MlKem768(Arc::new(::ml_kem::DecapsulationKey::from_seed(seed)))
             }
             MlKemParameterSet::MlKem1024 => {
-                Self::MlKem1024(::ml_kem::DecapsulationKey::from_seed(seed))
+                Self::MlKem1024(Arc::new(::ml_kem::DecapsulationKey::from_seed(seed)))
             }
         }
     }
@@ -114,7 +114,7 @@ impl MlKemPrivateKey {
                 let expanded = ::ml_kem::ExpandedDecapsulationKey::<$params>::try_from(expanded)
                     .map_err(|_| MlKemError::InvalidExpandedPrivateKey)?;
                 ::ml_kem::ExpandedKeyEncoding::from_expanded_bytes(&expanded)
-                    .map(Self::$variant)
+                    .map(|key| Self::$variant(Arc::new(key)))
                     .map_err(|_| MlKemError::InvalidExpandedPrivateKey)
             }};
         }
@@ -133,15 +133,15 @@ impl MlKemPrivateKey {
         match parameter_set {
             MlKemParameterSet::MlKem512 => {
                 ::ml_kem::DecapsulationKey::<::ml_kem::MlKem512>::from_pkcs8_der(encoded)
-                    .map(Self::MlKem512)
+                    .map(|key| Self::MlKem512(Arc::new(key)))
             }
             MlKemParameterSet::MlKem768 => {
                 ::ml_kem::DecapsulationKey::<::ml_kem::MlKem768>::from_pkcs8_der(encoded)
-                    .map(Self::MlKem768)
+                    .map(|key| Self::MlKem768(Arc::new(key)))
             }
             MlKemParameterSet::MlKem1024 => {
                 ::ml_kem::DecapsulationKey::<::ml_kem::MlKem1024>::from_pkcs8_der(encoded)
-                    .map(Self::MlKem1024)
+                    .map(|key| Self::MlKem1024(Arc::new(key)))
             }
         }
         .map_err(|_| MlKemError::InvalidPrivateKey)
@@ -294,6 +294,7 @@ pub enum MlDsaError {
     InvalidSignature,
     RandomnessUnavailable,
     SigningFailed,
+    KeyConstructionFailed,
 }
 
 /// How an ML-DSA signature obtains its per-signature randomizer.
@@ -307,15 +308,15 @@ pub enum MlDsaRandomization {
     HedgePreferred,
 }
 
-/// An ML-DSA private key with its expanded form cached by RustCrypto.
+/// An ML-DSA private key with immutable expanded state shared between handles.
 #[derive(Clone)]
 pub enum MlDsaPrivateKey {
-    MlDsa44(SigningKey<MlDsa44>),
-    MlDsa65(SigningKey<MlDsa65>),
-    MlDsa87(SigningKey<MlDsa87>),
+    MlDsa44(Arc<SigningKey<MlDsa44>>),
+    MlDsa65(Arc<SigningKey<MlDsa65>>),
+    MlDsa87(Arc<SigningKey<MlDsa87>>),
 }
 
-// The `ml-dsa` dependency is compiled with its `zeroize` feature.
+// The `ml-dsa` dependency zeroizes the expanded key when its last owner drops.
 impl ZeroizeOnDrop for MlDsaPrivateKey {}
 
 impl fmt::Debug for MlDsaPrivateKey {
@@ -327,24 +328,49 @@ impl fmt::Debug for MlDsaPrivateKey {
     }
 }
 
+// RustCrypto constructs large by-value matrices before boxing the finished key.
+// On iOS, keep those temporaries off the small caller stack, including in
+// unoptimized builds. Other targets construct directly on the calling thread.
+// The scoped worker borrows its inputs and is joined before this function returns;
+// only the completed, heap-backed key moves back to the caller.
+fn construct_ml_dsa_key<T: Send>(construct: impl FnOnce() -> T + Send) -> Result<T, MlDsaError> {
+    #[cfg(not(target_os = "ios"))]
+    {
+        Ok(construct())
+    }
+    #[cfg(target_os = "ios")]
+    {
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("ml-dsa-key-construction".into())
+                .stack_size(4 * 1024 * 1024)
+                .spawn_scoped(scope, construct)
+                .map_err(|_| MlDsaError::KeyConstructionFailed)?;
+            match worker.join() {
+                Ok(key) => Ok(key),
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        })
+    }
+}
+
 impl MlDsaPrivateKey {
     pub fn from_pkcs8_der(
         parameter_set: MlDsaParameterSet,
         encoded: &[u8],
     ) -> Result<Self, MlDsaError> {
         use ::ml_dsa::pkcs8::DecodePrivateKey;
-        match parameter_set {
-            MlDsaParameterSet::MlDsa44 => {
-                SigningKey::<MlDsa44>::from_pkcs8_der(encoded).map(Self::MlDsa44)
+        construct_ml_dsa_key(|| {
+            match parameter_set {
+                MlDsaParameterSet::MlDsa44 => SigningKey::<MlDsa44>::from_pkcs8_der(encoded)
+                    .map(|key| Self::MlDsa44(Arc::new(key))),
+                MlDsaParameterSet::MlDsa65 => SigningKey::<MlDsa65>::from_pkcs8_der(encoded)
+                    .map(|key| Self::MlDsa65(Arc::new(key))),
+                MlDsaParameterSet::MlDsa87 => SigningKey::<MlDsa87>::from_pkcs8_der(encoded)
+                    .map(|key| Self::MlDsa87(Arc::new(key))),
             }
-            MlDsaParameterSet::MlDsa65 => {
-                SigningKey::<MlDsa65>::from_pkcs8_der(encoded).map(Self::MlDsa65)
-            }
-            MlDsaParameterSet::MlDsa87 => {
-                SigningKey::<MlDsa87>::from_pkcs8_der(encoded).map(Self::MlDsa87)
-            }
-        }
-        .map_err(|_| MlDsaError::InvalidSeedLength)
+            .map_err(|_| MlDsaError::InvalidSeedLength)
+        })?
     }
 
     pub fn to_pkcs8_der(&self) -> Result<Zeroizing<Vec<u8>>, MlDsaError> {
@@ -361,24 +387,30 @@ impl MlDsaPrivateKey {
     pub fn generate(parameter_set: MlDsaParameterSet) -> Result<Self, MlDsaError> {
         let mut seed = Zeroizing::new([0_u8; 32]);
         getrandom::fill(seed.as_mut()).map_err(|_| MlDsaError::RandomnessUnavailable)?;
-        Ok(Self::from_seed(parameter_set, *seed))
+        Self::from_seed_slice(parameter_set, seed.as_ref())
     }
 
+    /// Construct a key from its seed, using a temporary expansion worker on iOS.
+    ///
+    /// # Panics
+    /// On iOS, panics if the construction thread cannot be created. Use
+    /// [`Self::from_seed_slice`] for a fallible constructor.
     pub fn from_seed(parameter_set: MlDsaParameterSet, seed: [u8; 32]) -> Self {
-        let seed = Seed::from(seed);
-        match parameter_set {
-            MlDsaParameterSet::MlDsa44 => Self::MlDsa44(SigningKey::from_seed(&seed)),
-            MlDsaParameterSet::MlDsa65 => Self::MlDsa65(SigningKey::from_seed(&seed)),
-            MlDsaParameterSet::MlDsa87 => Self::MlDsa87(SigningKey::from_seed(&seed)),
-        }
+        let seed = Zeroizing::new(seed);
+        Self::from_seed_slice(parameter_set, seed.as_ref())
+            .expect("ML-DSA key construction thread unavailable")
     }
 
     pub fn from_seed_slice(
         parameter_set: MlDsaParameterSet,
         seed: &[u8],
     ) -> Result<Self, MlDsaError> {
-        let seed = seed.try_into().map_err(|_| MlDsaError::InvalidSeedLength)?;
-        Ok(Self::from_seed(parameter_set, seed))
+        let seed = Zeroizing::new(Seed::try_from(seed).map_err(|_| MlDsaError::InvalidSeedLength)?);
+        construct_ml_dsa_key(|| match parameter_set {
+            MlDsaParameterSet::MlDsa44 => Self::MlDsa44(Arc::new(SigningKey::from_seed(&seed))),
+            MlDsaParameterSet::MlDsa65 => Self::MlDsa65(Arc::new(SigningKey::from_seed(&seed))),
+            MlDsaParameterSet::MlDsa87 => Self::MlDsa87(Arc::new(SigningKey::from_seed(&seed))),
+        })
     }
 
     pub const fn parameter_set(&self) -> MlDsaParameterSet {
@@ -409,10 +441,12 @@ impl MlDsaPrivateKey {
     }
 
     pub fn public_key(&self) -> Vec<u8> {
+        // Borrow the cached verification key: Keypair::verifying_key would
+        // clone its expanded matrix merely to encode the public bytes.
         match self {
-            Self::MlDsa44(key) => key.verifying_key().encode().to_vec(),
-            Self::MlDsa65(key) => key.verifying_key().encode().to_vec(),
-            Self::MlDsa87(key) => key.verifying_key().encode().to_vec(),
+            Self::MlDsa44(key) => key.as_ref().as_ref().encode().to_vec(),
+            Self::MlDsa65(key) => key.as_ref().as_ref().encode().to_vec(),
+            Self::MlDsa87(key) => key.as_ref().as_ref().encode().to_vec(),
         }
     }
 
@@ -479,7 +513,7 @@ pub fn verify_ml_dsa(
         ($params:ty) => {{
             let encoded = EncodedVerifyingKey::<$params>::try_from(public_key)
                 .map_err(|_| MlDsaError::InvalidPublicKey)?;
-            let key = ::ml_dsa::VerifyingKey::<$params>::decode(&encoded);
+            let key = construct_ml_dsa_key(|| ::ml_dsa::VerifyingKey::<$params>::decode(&encoded))?;
             let signature = Signature::<$params>::try_from(signature)
                 .map_err(|_| MlDsaError::InvalidSignature)?;
             if key.verify_with_context(message, context, &signature) {
@@ -500,19 +534,14 @@ pub fn validate_ml_dsa_public_key(
     parameter_set: MlDsaParameterSet,
     public_key: &[u8],
 ) -> Result<(), MlDsaError> {
-    macro_rules! validate {
-        ($params:ty) => {{
-            let encoded = EncodedVerifyingKey::<$params>::try_from(public_key)
-                .map_err(|_| MlDsaError::InvalidPublicKey)?;
-            let _ = ::ml_dsa::VerifyingKey::<$params>::decode(&encoded);
-            Ok(())
-        }};
+    // FIPS 204 pkDecode accepts every encoding of the required length: rho is
+    // an arbitrary seed and t1 is a packed vector of 10-bit coefficients.
+    // Constructing VerifyingKey also expands its matrix, which adds no input
+    // validation and can overflow a small caller stack in unoptimized builds.
+    if public_key.len() != parameter_set.public_key_length() {
+        return Err(MlDsaError::InvalidPublicKey);
     }
-    match parameter_set {
-        MlDsaParameterSet::MlDsa44 => validate!(MlDsa44),
-        MlDsaParameterSet::MlDsa65 => validate!(MlDsa65),
-        MlDsaParameterSet::MlDsa87 => validate!(MlDsa87),
-    }
+    Ok(())
 }
 
 /// Encode a raw ML-DSA verification key as SubjectPublicKeyInfo DER.
@@ -520,28 +549,68 @@ pub fn ml_dsa_public_key_info(
     parameter_set: MlDsaParameterSet,
     public_key: &[u8],
 ) -> Result<Vec<u8>, MlDsaError> {
-    macro_rules! encode {
-        ($params:ty) => {{
-            use ::ml_dsa::pkcs8::EncodePublicKey;
-            let encoded = EncodedVerifyingKey::<$params>::try_from(public_key)
-                .map_err(|_| MlDsaError::InvalidPublicKey)?;
-            ::ml_dsa::VerifyingKey::<$params>::decode(&encoded)
-                .to_public_key_der()
-                .map(|document| document.as_bytes().to_vec())
-                .map_err(|_| MlDsaError::InvalidPublicKey)
-        }};
+    use ::ml_dsa::pkcs8::{
+        SubjectPublicKeyInfoRef,
+        der::{Encode, asn1::BitStringRef},
+        spki::AssociatedAlgorithmIdentifier,
+    };
+
+    validate_ml_dsa_public_key(parameter_set, public_key)?;
+    let algorithm = match parameter_set {
+        MlDsaParameterSet::MlDsa44 => MlDsa44::ALGORITHM_IDENTIFIER,
+        MlDsaParameterSet::MlDsa65 => MlDsa65::ALGORITHM_IDENTIFIER,
+        MlDsaParameterSet::MlDsa87 => MlDsa87::ALGORITHM_IDENTIFIER,
+    };
+    let subject_public_key =
+        BitStringRef::new(0, public_key).map_err(|_| MlDsaError::InvalidPublicKey)?;
+    SubjectPublicKeyInfoRef {
+        algorithm,
+        subject_public_key,
     }
-    match parameter_set {
-        MlDsaParameterSet::MlDsa44 => encode!(MlDsa44),
-        MlDsaParameterSet::MlDsa65 => encode!(MlDsa65),
-        MlDsaParameterSet::MlDsa87 => encode!(MlDsa87),
-    }
+    .to_der()
+    .map_err(|_| MlDsaError::InvalidPublicKey)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn ml_kem_clones_share_key_material_until_the_last_owner_drops() {
+        for parameter_set in [
+            MlKemParameterSet::MlKem512,
+            MlKemParameterSet::MlKem768,
+            MlKemParameterSet::MlKem1024,
+        ] {
+            let original = MlKemPrivateKey::from_seed(parameter_set, [7; 64]);
+            let cloned = original.clone();
+            let shared = match (&original, &cloned) {
+                (MlKemPrivateKey::MlKem512(a), MlKemPrivateKey::MlKem512(b)) => Arc::ptr_eq(a, b),
+                (MlKemPrivateKey::MlKem768(a), MlKemPrivateKey::MlKem768(b)) => Arc::ptr_eq(a, b),
+                (MlKemPrivateKey::MlKem1024(a), MlKemPrivateKey::MlKem1024(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            };
+            assert!(shared);
+            let (ciphertext, secret) =
+                ml_kem_encapsulate(parameter_set, &original.public_key()).unwrap();
+            drop(original);
+            assert_eq!(cloned.decapsulate(&ciphertext).unwrap(), secret);
+            macro_rules! released {
+                ($key:expr) => {{
+                    let weak = Arc::downgrade(&$key);
+                    assert_eq!(weak.strong_count(), 1);
+                    drop($key);
+                    assert!(weak.upgrade().is_none());
+                }};
+            }
+            match cloned {
+                MlKemPrivateKey::MlKem512(key) => released!(key),
+                MlKemPrivateKey::MlKem768(key) => released!(key),
+                MlKemPrivateKey::MlKem1024(key) => released!(key),
+            }
+        }
+    }
 
     #[test]
     fn every_ml_kem_parameter_set_round_trips_all_key_encodings() {
@@ -671,6 +740,147 @@ mod tests {
                 key.decapsulate(&vec![0; parameter_set.ciphertext_length() - 1]),
                 Err(MlKemError::InvalidCiphertext)
             );
+        }
+    }
+
+    #[test]
+    fn ml_dsa_keys_survive_construction_thread_exit() {
+        for parameter_set in [
+            MlDsaParameterSet::MlDsa44,
+            MlDsaParameterSet::MlDsa65,
+            MlDsaParameterSet::MlDsa87,
+        ] {
+            let (seeded, restored, generated) = std::thread::Builder::new()
+                .name(format!("{parameter_set:?}-construction-caller"))
+                .stack_size(if cfg!(target_os = "ios") {
+                    128 * 1024
+                } else {
+                    4 * 1024 * 1024
+                })
+                .spawn(move || {
+                    let seeded = MlDsaPrivateKey::from_seed(parameter_set, [7; 32]);
+                    let cloned = seeded.clone();
+                    let same_allocation = match (&seeded, &cloned) {
+                        (MlDsaPrivateKey::MlDsa44(a), MlDsaPrivateKey::MlDsa44(b)) => {
+                            Arc::ptr_eq(a, b)
+                        }
+                        (MlDsaPrivateKey::MlDsa65(a), MlDsaPrivateKey::MlDsa65(b)) => {
+                            Arc::ptr_eq(a, b)
+                        }
+                        (MlDsaPrivateKey::MlDsa87(a), MlDsaPrivateKey::MlDsa87(b)) => {
+                            Arc::ptr_eq(a, b)
+                        }
+                        _ => false,
+                    };
+                    assert!(same_allocation);
+                    drop(seeded);
+                    let seeded = cloned;
+                    let encoded = seeded.to_pkcs8_der().unwrap();
+                    let restored =
+                        MlDsaPrivateKey::from_pkcs8_der(parameter_set, &encoded).unwrap();
+                    let generated = MlDsaPrivateKey::generate(parameter_set).unwrap();
+                    assert!(matches!(
+                        MlDsaPrivateKey::from_pkcs8_der(parameter_set, &[0; 16]),
+                        Err(MlDsaError::InvalidSeedLength)
+                    ));
+                    (seeded, restored, generated)
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+
+            assert_eq!(*seeded.seed(), [7; 32]);
+            assert_eq!(*restored.seed(), [7; 32]);
+            assert_eq!(seeded.public_key(), restored.public_key());
+            // Exercise returned keys after both construction and caller threads
+            // have exited. On iOS, use the small caller stack without a stack
+            // override around signing or the verification operation. Other
+            // platforms keep their direct construction path on a larger stack.
+            std::thread::Builder::new()
+                .name(format!("{parameter_set:?}-crypto-caller"))
+                .stack_size(if cfg!(target_os = "ios") {
+                    512 * 1024
+                } else {
+                    4 * 1024 * 1024
+                })
+                .spawn(move || {
+                    for key in [seeded, restored, generated] {
+                        let public = key.public_key();
+                        let signature = key.sign_deterministic(b"message", b"context").unwrap();
+                        verify_ml_dsa(parameter_set, &public, b"message", b"context", &signature)
+                            .unwrap();
+                        assert_eq!(
+                            verify_ml_dsa(
+                                parameter_set,
+                                &public,
+                                b"changed",
+                                b"context",
+                                &signature
+                            ),
+                            Err(MlDsaError::InvalidSignature)
+                        );
+                    }
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn ml_dsa_public_metadata_fits_small_stacks_and_matches_upstream_der() {
+        use ::ml_dsa::pkcs8::EncodePublicKey;
+
+        for parameter_set in [
+            MlDsaParameterSet::MlDsa44,
+            MlDsaParameterSet::MlDsa65,
+            MlDsaParameterSet::MlDsa87,
+        ] {
+            for fill in [0, 0xff] {
+                let public_key = vec![fill; parameter_set.public_key_length()];
+                macro_rules! reference {
+                    ($params:ty) => {{
+                        let encoded =
+                            EncodedVerifyingKey::<$params>::try_from(public_key.as_slice())
+                                .unwrap();
+                        ::ml_dsa::VerifyingKey::<$params>::decode(&encoded)
+                            .to_public_key_der()
+                            .unwrap()
+                            .as_bytes()
+                            .to_vec()
+                    }};
+                }
+                let expected = match parameter_set {
+                    MlDsaParameterSet::MlDsa44 => reference!(MlDsa44),
+                    MlDsaParameterSet::MlDsa65 => reference!(MlDsa65),
+                    MlDsaParameterSet::MlDsa87 => reference!(MlDsa87),
+                };
+                let actual = std::thread::Builder::new()
+                    .stack_size(64 * 1024)
+                    .spawn(move || {
+                        validate_ml_dsa_public_key(parameter_set, &public_key).unwrap();
+                        ml_dsa_public_key_info(parameter_set, &public_key).unwrap()
+                    })
+                    .unwrap()
+                    .join()
+                    .unwrap();
+                assert_eq!(actual, expected);
+            }
+            for length in [
+                0,
+                parameter_set.public_key_length() - 1,
+                parameter_set.public_key_length() + 1,
+            ] {
+                let invalid = vec![0; length];
+                assert_eq!(
+                    validate_ml_dsa_public_key(parameter_set, &invalid),
+                    Err(MlDsaError::InvalidPublicKey)
+                );
+                assert_eq!(
+                    ml_dsa_public_key_info(parameter_set, &invalid),
+                    Err(MlDsaError::InvalidPublicKey)
+                );
+            }
         }
     }
 
