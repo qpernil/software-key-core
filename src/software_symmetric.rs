@@ -361,12 +361,11 @@ fn cmac_double(mut block: Vec<u8>) -> Vec<u8> {
     block
 }
 
-/// Calculate CMAC using a caller-supplied 64- or 128-bit block encryptor.
-pub fn cmac_with<E>(
+fn cmac_last_subkey<E>(
     block_size: usize,
     data: &[u8],
     mut encrypt_blocks: impl FnMut(&[u8]) -> Result<Vec<u8>, E>,
-) -> Result<Vec<u8>, BlockCipherModeError<E>> {
+) -> Result<(Zeroizing<Vec<u8>>, bool), BlockCipherModeError<E>> {
     if !matches!(block_size, 8 | 16) {
         return Err(BlockCipherModeError::InvalidBlockSize);
     }
@@ -382,6 +381,54 @@ pub fn cmac_with<E>(
     } else {
         cmac_double(subkey)
     };
+    Ok((Zeroizing::new(last_subkey), complete))
+}
+
+/// Calculate CMAC with one block encryption for subkey generation and one
+/// unpadded CBC encryption of the prepared message. The CBC callback must use
+/// an all-zero IV and return the full ciphertext, exactly as long as its input.
+/// Supports 64- and 128-bit block ciphers without reading the underlying key.
+pub fn cmac_with_cbc<E>(
+    block_size: usize,
+    data: &[u8],
+    encrypt_block: impl FnMut(&[u8]) -> Result<Vec<u8>, E>,
+    mut encrypt_cbc: impl FnMut(&[u8]) -> Result<Vec<u8>, E>,
+) -> Result<Vec<u8>, BlockCipherModeError<E>> {
+    let (last_subkey, complete) = cmac_last_subkey(block_size, data, encrypt_block)?;
+    let padded_len = data
+        .len()
+        .checked_add(if complete {
+            0
+        } else {
+            block_size - data.len() % block_size
+        })
+        .ok_or(BlockCipherModeError::InputTooLong)?;
+    let mut input = Zeroizing::new(vec![0; padded_len]);
+    input[..data.len()].copy_from_slice(data);
+    if !complete {
+        input[data.len()] = 0x80;
+    }
+    for (byte, subkey) in input[padded_len - block_size..]
+        .iter_mut()
+        .zip(last_subkey.iter())
+    {
+        *byte ^= subkey;
+    }
+    let ciphertext =
+        Zeroizing::new(encrypt_cbc(&input).map_err(BlockCipherModeError::BlockOperation)?);
+    if ciphertext.len() != padded_len {
+        return Err(BlockCipherModeError::InvalidBlockOutput);
+    }
+    Ok(ciphertext[padded_len - block_size..].to_vec())
+}
+
+/// Calculate CMAC using a caller-supplied 64- or 128-bit block encryptor.
+pub fn cmac_with<E>(
+    block_size: usize,
+    data: &[u8],
+    mut encrypt_blocks: impl FnMut(&[u8]) -> Result<Vec<u8>, E>,
+) -> Result<Vec<u8>, BlockCipherModeError<E>> {
+    let (last_subkey, complete) = cmac_last_subkey(block_size, data, &mut encrypt_blocks)?;
     let block_count = std::cmp::max(1, data.len().div_ceil(block_size));
     let mut state = vec![0; block_size];
 
@@ -394,7 +441,7 @@ pub fn cmac_with<E>(
             if !complete {
                 block[available] = 0x80;
             }
-            for (value, subkey) in block.iter_mut().zip(&last_subkey) {
+            for (value, subkey) in block.iter_mut().zip(last_subkey.iter()) {
                 *value ^= subkey;
             }
         }
@@ -1123,6 +1170,112 @@ mod tests {
             .unwrap()
             .as_slice(),
             expected
+        );
+    }
+
+    #[test]
+    fn cbc_cmac_matches_nist_vectors_with_two_cipher_calls() {
+        let key = hex("2b7e151628aed2a6abf7158809cf4f3c");
+        let message = hex(concat!(
+            "6bc1bee22e409f96e93d7e117393172a",
+            "ae2d8a571e03ac9c9eb76fac45af8e51",
+            "30c81c46a35ce411e5fbc1191a0a52ef",
+            "f69f2445df4f9b17ad2b417be66c3710"
+        ));
+        for (len, expected) in [
+            (0, "bb1d6929e95937287fa37d129b756746"),
+            (16, "070a16b46b4d4144f79bdd9dd04a287c"),
+            (40, "dfa66747de9ae63030ca32611497c827"),
+            (64, "51f0bebf7e3b9d92fc49741779363cfe"),
+        ] {
+            let mut block_calls = 0;
+            let mut cbc_calls = 0;
+            let mac = cmac_with_cbc(
+                16,
+                &message[..len],
+                |block| {
+                    block_calls += 1;
+                    assert_eq!(block, &[0; 16]);
+                    encrypt_aes_ecb(&key, block)
+                },
+                |blocks| {
+                    cbc_calls += 1;
+                    assert_eq!(blocks.len(), len.div_ceil(16).max(1) * 16);
+                    encrypt_aes_cbc(&key, &[0; 16], blocks)
+                },
+            )
+            .unwrap();
+            assert_eq!(mac, hex(expected));
+            assert_eq!((block_calls, cbc_calls), (1, 1));
+        }
+        // All boundary lengths, including partial final blocks, and both block sizes.
+        for len in 0..=64 {
+            for size in [8, 16] {
+                let key = if size == 8 {
+                    vec![0x31; 24]
+                } else {
+                    key.clone()
+                };
+                let encrypt = |block: &[u8]| {
+                    if size == 8 {
+                        encrypt_tdes_ecb(&key, block)
+                    } else {
+                        encrypt_aes_ecb(&key, block)
+                    }
+                };
+                let expected = cmac_with(size, &message[..len], encrypt).unwrap();
+                let actual = cmac_with_cbc(size, &message[..len], encrypt, |blocks| {
+                    if size == 8 {
+                        encrypt_tdes_cbc(&key, &[0; 8], blocks)
+                    } else {
+                        encrypt_aes_cbc(&key, &[0; 16], blocks)
+                    }
+                })
+                .unwrap();
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn cbc_cmac_propagates_failures_without_block_retry() {
+        for malformed in [false, true] {
+            let mut blocks = 0;
+            let mut chains = 0;
+            let result = cmac_with_cbc(
+                16,
+                &[0; 32],
+                |input| {
+                    blocks += 1;
+                    Ok(input.to_vec())
+                },
+                |_| {
+                    chains += 1;
+                    if malformed {
+                        Ok(vec![0; 16])
+                    } else {
+                        Err("CBC failed")
+                    }
+                },
+            );
+            assert_eq!(
+                result,
+                Err(if malformed {
+                    BlockCipherModeError::InvalidBlockOutput
+                } else {
+                    BlockCipherModeError::BlockOperation("CBC failed")
+                })
+            );
+            assert_eq!((blocks, chains), (1, 1));
+        }
+        assert_eq!(
+            cmac_with_cbc(
+                16,
+                b"",
+                |_| Ok::<_, ()>(vec![0; 15]),
+                |_| panic!("no CBC after invalid subkey")
+            ),
+            Err(BlockCipherModeError::InvalidBlockOutput)
         );
     }
 
