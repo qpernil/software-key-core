@@ -682,8 +682,7 @@ dependencies = [
 [[package]]
 name = "module-lattice"
 version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c61b87c9683ab7cb1c6871d261ad5479b6b10ceb52c4352aaca3b5d35a8febe"
+source = "git+https://github.com/qpernil/KEMs.git?rev=2251f07e269ef6f42e3496666fbf5f70d95628eb#2251f07e269ef6f42e3496666fbf5f70d95628eb"
 dependencies = [
  "ctutils",
  "hybrid-array",

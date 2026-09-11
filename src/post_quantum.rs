@@ -294,7 +294,6 @@ pub enum MlDsaError {
     InvalidSignature,
     RandomnessUnavailable,
     SigningFailed,
-    KeyConstructionFailed,
 }
 
 /// How an ML-DSA signature obtains its per-signature randomizer.
@@ -328,49 +327,21 @@ impl fmt::Debug for MlDsaPrivateKey {
     }
 }
 
-// RustCrypto constructs large by-value matrices before boxing the finished key.
-// On iOS, keep those temporaries off the small caller stack, including in
-// unoptimized builds. Other targets construct directly on the calling thread.
-// The scoped worker borrows its inputs and is joined before this function returns;
-// only the completed, heap-backed key moves back to the caller.
-fn construct_ml_dsa_key<T: Send>(construct: impl FnOnce() -> T + Send) -> Result<T, MlDsaError> {
-    #[cfg(not(target_os = "ios"))]
-    {
-        Ok(construct())
-    }
-    #[cfg(target_os = "ios")]
-    {
-        std::thread::scope(|scope| {
-            let worker = std::thread::Builder::new()
-                .name("ml-dsa-key-construction".into())
-                .stack_size(4 * 1024 * 1024)
-                .spawn_scoped(scope, construct)
-                .map_err(|_| MlDsaError::KeyConstructionFailed)?;
-            match worker.join() {
-                Ok(key) => Ok(key),
-                Err(panic) => std::panic::resume_unwind(panic),
-            }
-        })
-    }
-}
-
 impl MlDsaPrivateKey {
     pub fn from_pkcs8_der(
         parameter_set: MlDsaParameterSet,
         encoded: &[u8],
     ) -> Result<Self, MlDsaError> {
         use ::ml_dsa::pkcs8::DecodePrivateKey;
-        construct_ml_dsa_key(|| {
-            match parameter_set {
-                MlDsaParameterSet::MlDsa44 => SigningKey::<MlDsa44>::from_pkcs8_der(encoded)
-                    .map(|key| Self::MlDsa44(Arc::new(key))),
-                MlDsaParameterSet::MlDsa65 => SigningKey::<MlDsa65>::from_pkcs8_der(encoded)
-                    .map(|key| Self::MlDsa65(Arc::new(key))),
-                MlDsaParameterSet::MlDsa87 => SigningKey::<MlDsa87>::from_pkcs8_der(encoded)
-                    .map(|key| Self::MlDsa87(Arc::new(key))),
-            }
-            .map_err(|_| MlDsaError::InvalidSeedLength)
-        })?
+        match parameter_set {
+            MlDsaParameterSet::MlDsa44 => SigningKey::<MlDsa44>::from_pkcs8_der(encoded)
+                .map(|key| Self::MlDsa44(Arc::new(key))),
+            MlDsaParameterSet::MlDsa65 => SigningKey::<MlDsa65>::from_pkcs8_der(encoded)
+                .map(|key| Self::MlDsa65(Arc::new(key))),
+            MlDsaParameterSet::MlDsa87 => SigningKey::<MlDsa87>::from_pkcs8_der(encoded)
+                .map(|key| Self::MlDsa87(Arc::new(key))),
+        }
+        .map_err(|_| MlDsaError::InvalidSeedLength)
     }
 
     pub fn to_pkcs8_der(&self) -> Result<Zeroizing<Vec<u8>>, MlDsaError> {
@@ -390,15 +361,10 @@ impl MlDsaPrivateKey {
         Self::from_seed_slice(parameter_set, seed.as_ref())
     }
 
-    /// Construct a key from its seed, using a temporary expansion worker on iOS.
-    ///
-    /// # Panics
-    /// On iOS, panics if the construction thread cannot be created. Use
-    /// [`Self::from_seed_slice`] for a fallible constructor.
+    /// Construct a key from its seed.
     pub fn from_seed(parameter_set: MlDsaParameterSet, seed: [u8; 32]) -> Self {
         let seed = Zeroizing::new(seed);
-        Self::from_seed_slice(parameter_set, seed.as_ref())
-            .expect("ML-DSA key construction thread unavailable")
+        Self::from_seed_slice(parameter_set, seed.as_ref()).expect("fixed-size ML-DSA seed")
     }
 
     pub fn from_seed_slice(
@@ -406,7 +372,7 @@ impl MlDsaPrivateKey {
         seed: &[u8],
     ) -> Result<Self, MlDsaError> {
         let seed = Zeroizing::new(Seed::try_from(seed).map_err(|_| MlDsaError::InvalidSeedLength)?);
-        construct_ml_dsa_key(|| match parameter_set {
+        Ok(match parameter_set {
             MlDsaParameterSet::MlDsa44 => Self::MlDsa44(Arc::new(SigningKey::from_seed(&seed))),
             MlDsaParameterSet::MlDsa65 => Self::MlDsa65(Arc::new(SigningKey::from_seed(&seed))),
             MlDsaParameterSet::MlDsa87 => Self::MlDsa87(Arc::new(SigningKey::from_seed(&seed))),
@@ -513,7 +479,7 @@ pub fn verify_ml_dsa(
         ($params:ty) => {{
             let encoded = EncodedVerifyingKey::<$params>::try_from(public_key)
                 .map_err(|_| MlDsaError::InvalidPublicKey)?;
-            let key = construct_ml_dsa_key(|| ::ml_dsa::VerifyingKey::<$params>::decode(&encoded))?;
+            let key = ::ml_dsa::VerifyingKey::<$params>::decode(&encoded);
             let signature = Signature::<$params>::try_from(signature)
                 .map_err(|_| MlDsaError::InvalidSignature)?;
             if key.verify_with_context(message, context, &signature) {
@@ -744,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn ml_dsa_keys_survive_construction_thread_exit() {
+    fn ml_dsa_keys_fit_small_stacks_and_share_storage() {
         for parameter_set in [
             MlDsaParameterSet::MlDsa44,
             MlDsaParameterSet::MlDsa65,
@@ -752,11 +718,7 @@ mod tests {
         ] {
             let (seeded, restored, generated) = std::thread::Builder::new()
                 .name(format!("{parameter_set:?}-construction-caller"))
-                .stack_size(if cfg!(target_os = "ios") {
-                    128 * 1024
-                } else {
-                    4 * 1024 * 1024
-                })
+                .stack_size(128 * 1024)
                 .spawn(move || {
                     let seeded = MlDsaPrivateKey::from_seed(parameter_set, [7; 32]);
                     let cloned = seeded.clone();
@@ -792,17 +754,10 @@ mod tests {
             assert_eq!(*seeded.seed(), [7; 32]);
             assert_eq!(*restored.seed(), [7; 32]);
             assert_eq!(seeded.public_key(), restored.public_key());
-            // Exercise returned keys after both construction and caller threads
-            // have exited. On iOS, use the small caller stack without a stack
-            // override around signing or the verification operation. Other
-            // platforms keep their direct construction path on a larger stack.
+            // Exercise returned keys after the construction caller has exited.
             std::thread::Builder::new()
                 .name(format!("{parameter_set:?}-crypto-caller"))
-                .stack_size(if cfg!(target_os = "ios") {
-                    512 * 1024
-                } else {
-                    4 * 1024 * 1024
-                })
+                .stack_size(512 * 1024)
                 .spawn(move || {
                     for key in [seeded, restored, generated] {
                         let public = key.public_key();
