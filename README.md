@@ -44,18 +44,12 @@ ML-DSA public-key validation and SubjectPublicKeyInfo encoding operate on the
 fixed-size raw encoding without expanding a verification matrix. Every
 correctly sized FIPS 204 public-key encoding is decodable. Tests compare DER
 against the upstream encoder for all parameter sets and exercise metadata
-operations on a 64 KiB stack. On iOS, ML-DSA private-key generation/import
-and public-key construction for verification use a short-lived, scoped worker
-with a 4 MiB stack. Other platforms construct keys on the calling thread.
-RustCrypto expands large by-value matrices before boxing its keys;
-this keeps those construction temporaries off the caller's stack even in
-unoptimized builds. The worker borrows its inputs, returns the heap-backed key
-by move, and is joined before the constructor returns. Signing and verification
-run on the caller's thread. The key-lifetime test uses a 128 KiB construction
-caller and a 512 KiB signing/verification caller on iOS, and larger caller
-stacks elsewhere.
-On iOS, fallible constructors report a thread-creation failure as `KeyConstructionFailed`;
-the existing infallible `from_seed` constructor panics on that failure.
+operations on a 64 KiB stack. With allocation enabled, the ML-DSA dependency
+constructs its large lattice vectors and matrices directly in heap storage.
+Private-key generation and import, and public-key construction for verification,
+therefore run directly on the caller's thread, including in unoptimized iOS
+builds. Tests cover ML-DSA-87 construction on a 128 KiB stack and signing and
+verification on a 512 KiB stack.
 Cloned ML-DSA and ML-KEM handles share immutable expanded key state through
 `Arc`. RSA handles similarly share the private key and its CRT precomputation.
 Cloning does not duplicate key material or spawn a worker. Each underlying key

@@ -53,3 +53,6 @@ subtle = "2.6.1"
 x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
 x448 = { version = "0.14.0-pre.12", default-features = false, features = ["static_secrets"] }
 zeroize = "1.9.0"
+
+[patch.crates-io]
+module-lattice = { git = "https://github.com/qpernil/KEMs.git", rev = "2251f07e269ef6f42e3496666fbf5f70d95628eb" }
