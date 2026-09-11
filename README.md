@@ -10,7 +10,10 @@ CBC, CTR, CMAC, CCM, GCM/GMAC, PKCS #7 padding, RFC 3394 key wrap and RFC 5649
 key wrap with padding. The construction APIs operate over caller-supplied block
 capabilities, allowing the same implementation to serve software keys and
 hardware-held keys. AES-specific names are reserved for convenience APIs which
-actually accept AES key bytes.
+actually accept AES key bytes. `cmac_with_cbc` combines one block encryption
+for CMAC subkeys with one unpadded, zero-IV CBC call for the complete prepared
+message, reducing hardware round trips. It shares final-block/subkey handling
+with the block-only `cmac_with` construction.
 
 Digest support is similarly centralized: SHA-1, SHA-2 and SHA-3 hashing,
 streaming hash contexts, HMAC, MGF1, X9.63 KDF, HKDF and PBKDF2-HMAC. RSA
