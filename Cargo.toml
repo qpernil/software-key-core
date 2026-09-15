@@ -55,4 +55,6 @@ x448 = { version = "0.14.0-pre.12", default-features = false, features = ["stati
 zeroize = "1.9.0"
 
 [patch.crates-io]
-module-lattice = { git = "https://github.com/qpernil/KEMs.git", rev = "2251f07e269ef6f42e3496666fbf5f70d95628eb" }
+# Keep these paired: the vector storage API also requires the ML-KEM iterator changes.
+module-lattice = { git = "https://github.com/qpernil/KEMs.git", rev = "38545c295eac0c2bcccd4138084cc9dbde5f6009" }
+ml-kem = { git = "https://github.com/qpernil/KEMs.git", rev = "38545c295eac0c2bcccd4138084cc9dbde5f6009" }

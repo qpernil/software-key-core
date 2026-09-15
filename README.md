@@ -45,7 +45,9 @@ fixed-size raw encoding without expanding a verification matrix. Every
 correctly sized FIPS 204 public-key encoding is decodable. Tests compare DER
 against the upstream encoder for all parameter sets and exercise metadata
 operations on a 64 KiB stack. With allocation enabled, the ML-DSA dependency
-constructs its large lattice vectors and matrices directly in heap storage.
+stores lattice vectors in `MaybeBox` and assembles matrices from heap-backed
+rows. Construction uses row-sized stack temporaries instead of a full inline
+matrix.
 Private-key generation and import, and public-key construction for verification,
 therefore run directly on the caller's thread, including in unoptimized iOS
 builds. Tests cover ML-DSA-87 construction on a 128 KiB stack and signing and
