@@ -44,14 +44,15 @@ ML-DSA public-key validation and SubjectPublicKeyInfo encoding operate on the
 fixed-size raw encoding without expanding a verification matrix. Every
 correctly sized FIPS 204 public-key encoding is decodable. Tests compare DER
 against the upstream encoder for all parameter sets and exercise metadata
-operations on a 64 KiB stack. With allocation enabled, the ML-DSA dependency
-stores lattice vectors in `MaybeBox` and assembles matrices from heap-backed
-rows. Construction uses row-sized stack temporaries instead of a full inline
-matrix.
-Private-key generation and import, and public-key construction for verification,
-therefore run directly on the caller's thread, including in unoptimized iOS
-builds. Tests cover ML-DSA-87 construction on a 128 KiB stack and signing and
-verification on a 512 KiB stack.
+operations on a 64 KiB stack. With allocation enabled, the pinned ML-DSA
+implementation stores private matrices as `MaybeBox` rows, so sampling and
+cloning avoid a full inline matrix. The public lattice types and constructors
+are unchanged; other vectors and intermediate values still use stack space.
+Private-key generation and import, public-key construction, signing, and
+verification run directly on the caller's thread. Tests cover all three
+ML-DSA parameter sets on 512 KiB stacks, including unoptimized builds. This is
+a tested configuration rather than a portable bound; callers need additional
+headroom for their own stack frames.
 Cloned ML-DSA and ML-KEM handles share immutable expanded key state through
 `Arc`. RSA handles similarly share the private key and its CRT precomputation.
 Cloning does not duplicate key material or spawn a worker. Each underlying key
