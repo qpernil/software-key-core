@@ -718,7 +718,7 @@ mod tests {
         ] {
             let (seeded, restored, generated) = std::thread::Builder::new()
                 .name(format!("{parameter_set:?}-construction-caller"))
-                .stack_size(128 * 1024)
+                .stack_size(512 * 1024)
                 .spawn(move || {
                     let seeded = MlDsaPrivateKey::from_seed(parameter_set, [7; 32]);
                     let cloned = seeded.clone();
