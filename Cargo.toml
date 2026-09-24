@@ -19,13 +19,13 @@ spki = { version = "0.8.0", features = ["alloc", "std"], optional = true }
 x509-cert = { version = "0.3.0", default-features = false, features = ["std"], optional = true }
 rustls-pki-types = { version = "1.15.1", optional = true }
 webpki = { package = "rustls-webpki", version = "0.103.13", features = ["ring", "std"], optional = true }
-aes = "0.8.4"
+aes = "0.9.3"
 aes-kw = { version = "0.3.1", default-features = false }
 bp256 = { version = "=0.14.0-rc.15", default-features = false, features = ["arithmetic", "ecdsa", "pkcs8", "sha256", "std"] }
 bp384 = { version = "=0.14.0-rc.15", default-features = false, features = ["arithmetic", "ecdsa", "pkcs8", "sha384", "std"] }
-ccm = "0.5.0"
-cmac = "0.7.2"
-des = "0.8.1"
+ccm = "0.6.1"
+cmac = "0.8.0"
+des = "0.9.0"
 ed25519-dalek = { version = "3.0.0", features = ["alloc", "pkcs8"] }
 ed448-goldilocks = { version = "0.14.0-pre.15", default-features = false, features = ["alloc", "pkcs8", "signing"] }
 getrandom = "0.4.3"
@@ -33,7 +33,7 @@ ghash = "0.6.0"
 hkdf = "0.13.0"
 hmac = "0.13.0"
 k256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "std"] }
-ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "getrandom", "pkcs8", "zeroize"] }
+ml-dsa = { git = "https://github.com/qpernil/signatures.git", rev = "e06d2e28699428fbcc135c388516883bbb71f170", default-features = false, features = ["alloc", "getrandom", "pkcs8", "zeroize"] }
 ml-kem = { version = "0.3.2", features = ["pkcs8", "zeroize"] }
 num-bigint-dig = "0.8.6"
 pbkdf2 = { version = "0.13.0", features = ["hmac"] }
@@ -48,13 +48,9 @@ primeorder = "0.14.0"
 rsa = { version = "0.9.10", default-features = false, features = ["hazmat", "std", "u64_digit"] }
 sha1 = "0.11.0"
 sha2 = "0.11.0"
-sha3 = "0.12.0"
+sha3 = "0.11.0"
 signature = "3.0.0"
 subtle = "2.6.1"
 x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
 x448 = { version = "0.14.0-pre.12", default-features = false, features = ["static_secrets"] }
 zeroize = "1.9.0"
-
-[patch.crates-io]
-# Reduce ML-DSA matrix stack usage without changing public lattice types.
-ml-dsa = { git = "https://github.com/qpernil/signatures.git", rev = "e06d2e28699428fbcc135c388516883bbb71f170" }

@@ -144,18 +144,7 @@ impl ParsedCertificate {
     }
 
     pub fn p256_public_point(&self) -> Result<Vec<u8>, Error> {
-        let spki = &self.certificate.tbs_certificate().subject_public_key_info();
-        if spki.algorithm.oid != EC_PUBLIC_KEY || algorithm_parameter_oid(spki)? != P256_CURVE {
-            return Err(INVALID);
-        }
-        let point = spki.subject_public_key.as_bytes().ok_or(INVALID)?;
-        SoftwarePublicKey::Ec {
-            curve: EcCurve::P256,
-            uncompressed: point.to_vec(),
-        }
-        .validate()
-        .map_err(|_| INVALID)?;
-        Ok(point.to_vec())
+        p256_public_point(&self.certificate)
     }
 
     /// Require an end-entity key authorized for key agreement.
@@ -391,7 +380,8 @@ fn algorithm_identifier_contents(
     Ok(encoded)
 }
 
-fn verify_certificate_signature(
+/// Verify a certificate signature using its issuer's public key.
+pub fn verify_certificate_signature(
     certificate: &Certificate,
     issuer: &Certificate,
 ) -> Result<(), Error> {
@@ -420,6 +410,22 @@ fn verify_certificate_signature(
     issuer
         .verify_signature(algorithm, &message, signature)
         .map_err(|_| INVALID)
+}
+
+/// Validate and return the uncompressed P-256 point in a certificate.
+pub fn p256_public_point(certificate: &Certificate) -> Result<Vec<u8>, CertificateError> {
+    let spki = certificate.tbs_certificate().subject_public_key_info();
+    if spki.algorithm.oid != EC_PUBLIC_KEY || algorithm_parameter_oid(spki)? != P256_CURVE {
+        return Err(INVALID);
+    }
+    let point = spki.subject_public_key.as_bytes().ok_or(INVALID)?;
+    SoftwarePublicKey::Ec {
+        curve: EcCurve::P256,
+        uncompressed: point.to_vec(),
+    }
+    .validate()
+    .map_err(|_| INVALID)?;
+    Ok(point.to_vec())
 }
 
 fn sha256_fingerprint(data: &[u8]) -> Fingerprint {
