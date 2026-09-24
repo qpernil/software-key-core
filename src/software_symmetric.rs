@@ -2,11 +2,11 @@
 
 use aes::{
     Aes128, Aes192, Aes256,
-    cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray},
+    cipher::{Block, BlockCipherDecrypt, BlockCipherEncrypt, KeyInit},
 };
 use ccm::{
     Ccm,
-    aead::{Aead, generic_array::GenericArray as AeadArray},
+    aead::Aead,
     consts::{U13, U16},
 };
 use cmac::{Cmac, Mac};
@@ -805,7 +805,7 @@ pub fn encrypt_yubico_otp_aead(
     if nonce.len() != AES_CCM_NONCE_SIZE {
         return Err(SoftwareSymmetricError::InvalidIvLength);
     }
-    let nonce = AeadArray::from_slice(nonce);
+    let nonce: &ccm::Nonce<U13> = nonce.try_into().unwrap();
     macro_rules! encrypt {
         ($cipher:ty) => {
             Ccm::<$cipher, ccm::consts::U8, U13>::new_from_slice(key)
@@ -833,7 +833,7 @@ pub fn decrypt_yubico_otp_aead(
     if ciphertext_and_tag.len() < YUBICO_OTP_TAG_SIZE {
         return Err(SoftwareSymmetricError::InvalidDataLength);
     }
-    let nonce = AeadArray::from_slice(nonce);
+    let nonce: &ccm::Nonce<U13> = nonce.try_into().unwrap();
     macro_rules! decrypt {
         ($cipher:ty) => {
             Ccm::<$cipher, ccm::consts::U8, U13>::new_from_slice(key)
@@ -858,7 +858,7 @@ pub fn encrypt_aes_ccm(
     if nonce.len() != AES_CCM_NONCE_SIZE {
         return Err(SoftwareSymmetricError::InvalidIvLength);
     }
-    let nonce = AeadArray::from_slice(nonce);
+    let nonce: &ccm::Nonce<U13> = nonce.try_into().unwrap();
     match key.len() {
         16 => Ccm::<Aes128, U16, U13>::new_from_slice(key)
             .unwrap()
@@ -887,7 +887,7 @@ pub fn decrypt_aes_ccm(
     if ciphertext_and_tag.len() < AES_CCM_TAG_SIZE {
         return Err(SoftwareSymmetricError::InvalidDataLength);
     }
-    let nonce = AeadArray::from_slice(nonce);
+    let nonce: &ccm::Nonce<U13> = nonce.try_into().unwrap();
     match key.len() {
         16 => Ccm::<Aes128, U16, U13>::new_from_slice(key)
             .unwrap()
@@ -921,7 +921,7 @@ impl AesCipher {
         }
     }
 
-    fn encrypt_block(&self, block: &mut GenericArray<u8, aes::cipher::consts::U16>) {
+    fn encrypt_block(&self, block: &mut Block<Aes128>) {
         match self {
             Self::Aes128(cipher) => cipher.encrypt_block(block),
             Self::Aes192(cipher) => cipher.encrypt_block(block),
@@ -929,7 +929,7 @@ impl AesCipher {
         }
     }
 
-    fn decrypt_block(&self, block: &mut GenericArray<u8, aes::cipher::consts::U16>) {
+    fn decrypt_block(&self, block: &mut Block<Aes128>) {
         match self {
             Self::Aes128(cipher) => cipher.decrypt_block(block),
             Self::Aes192(cipher) => cipher.decrypt_block(block),
@@ -942,7 +942,7 @@ impl AesCipher {
 pub fn aes_cmac(key: &[u8], data: &[u8]) -> Result<[u8; AES_BLOCK_SIZE], SoftwareSymmetricError> {
     macro_rules! calculate {
         ($cipher:ty) => {{
-            let mut mac = <Cmac<$cipher> as Mac>::new_from_slice(key)
+            let mut mac = <Cmac<$cipher> as cmac::digest::KeyInit>::new_from_slice(key)
                 .map_err(|_| SoftwareSymmetricError::InvalidKeyLength)?;
             mac.update(data);
             Ok(mac.finalize().into_bytes().into())
@@ -963,7 +963,7 @@ pub fn encrypt_aes_block(
     input: &[u8; AES_BLOCK_SIZE],
 ) -> Result<[u8; AES_BLOCK_SIZE], SoftwareSymmetricError> {
     let cipher = AesCipher::new(key)?;
-    let mut block = GenericArray::from(*input);
+    let mut block = Block::<Aes128>::from(*input);
     cipher.encrypt_block(&mut block);
     Ok(block.into())
 }
@@ -974,7 +974,7 @@ pub fn decrypt_aes_block(
     input: &[u8; AES_BLOCK_SIZE],
 ) -> Result<[u8; AES_BLOCK_SIZE], SoftwareSymmetricError> {
     let cipher = AesCipher::new(key)?;
-    let mut block = GenericArray::from(*input);
+    let mut block = Block::<Aes128>::from(*input);
     cipher.decrypt_block(&mut block);
     Ok(block.into())
 }
@@ -998,7 +998,7 @@ fn transform_ecb(
     let cipher = AesCipher::new(key)?;
     let mut output = input.to_vec();
     for chunk in output.as_chunks_mut::<AES_BLOCK_SIZE>().0 {
-        let block = GenericArray::from_mut_slice(chunk);
+        let block: &mut Block<Aes128> = (&mut chunk[..]).try_into().unwrap();
         if encrypt {
             cipher.encrypt_block(block);
         } else {
@@ -1077,7 +1077,7 @@ fn crypt_tdes_ecb(
         TdesEde3::new_from_slice(key).map_err(|_| SoftwareSymmetricError::InvalidKeyLength)?;
     let mut output = input.to_vec();
     for chunk in output.as_chunks_mut::<TDES_BLOCK_SIZE>().0 {
-        let block = des::cipher::Block::<TdesEde3>::from_mut_slice(chunk);
+        let block: &mut des::cipher::Block<TdesEde3> = (&mut chunk[..]).try_into().unwrap();
         if encrypting {
             cipher.encrypt_block(block);
         } else {

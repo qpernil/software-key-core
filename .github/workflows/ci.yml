@@ -18,8 +18,11 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
+      - name: Run X.509 feature tests
+        run: cargo test --locked --all-features
+
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -35,7 +38,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Check minimum supported Rust version
-        run: cargo check --locked
+        run: cargo check --locked --all-features
 
   ios:
     runs-on: macos-latest
@@ -48,7 +51,7 @@ jobs:
         run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
       - name: Check iOS device build
-        run: cargo check --locked --target aarch64-apple-ios
+        run: cargo check --locked --all-features --target aarch64-apple-ios
 
       - name: Check iOS Simulator build
-        run: cargo check --locked --target aarch64-apple-ios-sim
+        run: cargo check --locked --all-features --target aarch64-apple-ios-sim
