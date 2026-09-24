@@ -626,9 +626,9 @@ mod tests {
             handle.record_mutation().unwrap()
         };
         assert!(receipt.wait().is_err());
-        assert!(failed.load(Ordering::Relaxed));
         assert!(handle.record_mutation().is_err());
         assert!(persistence.shutdown().is_err());
+        assert!(failed.load(Ordering::Relaxed));
     }
 
     #[test]
