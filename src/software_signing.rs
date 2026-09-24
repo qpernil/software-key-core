@@ -4,7 +4,8 @@
 //! projection, message and prehash signing, verification, and algorithm-specific
 //! controls such as RSA-PSS salt length. Callers retain responsibility for
 //! protocol identifiers, public-key containers, signature formatting, policy,
-//! and error mapping.
+//! and error mapping. The optional `certificate_signing` module supplies the
+//! standard X.509 container and signature encoding used by multiple callers.
 
 use crate::{
     brainpool512::{BrainpoolP512r1, SecretKey as BrainpoolP512SecretKey},

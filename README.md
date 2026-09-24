@@ -60,10 +60,13 @@ is zeroized when its last owner is dropped; object metadata and policy remain
 owned by the caller. Sharing and last-owner release are covered by clone-lifetime
 tests, including signing/decryption or decapsulation after the original is dropped.
 
-The optional `x509` feature provides strict certificate parsing, signature
-verification, and certificate-chain validation. Trust is supplied explicitly as
-CA certificates or a P-256 CA public key; presented certificates never become
-anchors. Providers retain their trust-selection and authorization policy.
+The optional `x509-signing` feature provides standard SubjectPublicKeyInfo
+projection and X.509 certificate-signing adapters for software keys. Callers
+retain certificate profiles, names, extensions, validity, serial-number policy,
+and protocol error mapping. The separate `x509-validation` feature provides
+strict certificate parsing, signature verification, and certificate-chain
+validation. Trust is supplied explicitly as CA certificates or a P-256 CA public
+key; presented certificates never become anchors.
 
 Private-key identity and operations are separate in the API. `KeyKind`
 selects what is generated or restored, including the RSA modulus size, while
@@ -76,11 +79,13 @@ seeds, scalars, RSA components, and PKCS#8 are boundary representations only.
 Private key allocations are zeroized on final-owner drop, and exported private
 bytes are returned in zeroizing buffers.
 
-It does not own protocol identifiers or encodings, PKCS #11 types, device
-authorization, object lifecycle, persistence, transport framing, session
-state, or protocol-specific error mapping. In particular, ARKG COSE/CBOR stays
-with the previewSign callers, and SCP03 session counters and message framing
-stay with the device/provider protocol layers.
+It does not own device- or protocol-specific identifiers and encodings, PKCS #11
+types, device authorization, object lifecycle, persistence, transport framing,
+session state, or protocol-specific error mapping. Standard X.509 SPKI and
+certificate-signature encoding are the deliberate shared exception; certificate
+profiles and extensions remain with callers. In particular, ARKG COSE/CBOR
+stays with the previewSign callers, and SCP03 session counters and message
+framing stay with the device/provider protocol layers.
 
 The local consumers intentionally use dependency-by-path so each working
 directory directly represents the code being built:
