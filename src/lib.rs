@@ -2,15 +2,18 @@
 //!
 //! This crate provides reusable key generation, signing, verification, and key
 //! agreement without depending on a device protocol or provider API. The optional
-//! x509 feature provides certificate parsing and explicit-anchor chain validation. Protocol
-//! and provider layers retain responsibility for identifiers, public-key
-//! containers, signature encodings, authorization policy, persistence, and
-//! error mapping.
+//! `x509-signing` feature provides standard SubjectPublicKeyInfo projection and
+//! certificate signing for software keys. The `x509-validation` feature provides
+//! certificate parsing and explicit-anchor chain validation. Protocol and provider
+//! layers retain responsibility for identifiers, certificate profiles and
+//! extensions, authorization policy, persistence, and error mapping.
 
 pub mod arkg;
 pub mod brainpool512;
-#[cfg(feature = "x509")]
+#[cfg(feature = "x509-validation")]
 pub mod certificate_chain;
+#[cfg(feature = "x509-signing")]
+pub mod certificate_signing;
 pub mod counter_kdf;
 pub mod digest;
 pub mod post_quantum;

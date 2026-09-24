@@ -9,7 +9,8 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [features]
-x509 = ["dep:const-oid", "dep:der", "dep:spki", "dep:x509-cert", "dep:rustls-pki-types", "dep:webpki"]
+x509-signing = ["dep:const-oid", "dep:der", "dep:spki"]
+x509-validation = ["dep:const-oid", "dep:der", "dep:spki", "dep:x509-cert", "dep:rustls-pki-types", "dep:webpki"]
 
 [dependencies]
 const-oid = { version = "0.10.2", optional = true }

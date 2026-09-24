@@ -60,8 +60,10 @@ P-256 agreement use the same `SoftwareSigningKey` and
 than a separate cryptographic implementation.
 
 `virtual-yubihsm` delegates device-static and ephemeral agreement, object ECDH,
-X25519, object signing, and attestation-certificate signatures to these APIs.
-`virtual-yubikey` does the same for CTAP agreement and all credential signing.
+X25519, object signing, standard public-key container projection, and
+attestation-certificate signatures to these APIs. `virtual-yubikey` does the
+same for CTAP agreement, all credential signing, public-key container projection,
+and certificate signatures.
 `pkcs11rs` delegates CTAP, SCP11 and YubiHSM agreement, public-point validation,
 ECDSA/Ed25519 verification, and derived P-256 authentication keys.
 
@@ -90,16 +92,18 @@ representation or protocol work:
 | `pkcs11rs` | `rsa` | PKCS #11/YubiHSM RSA key representation and raw public operations |
 | `pkcs11rs` | `getrandom`, `subtle` | Protocol challenges, generated object material and constant-time protocol comparisons |
 | `pkcs11rs-tool` | none of the curve crates | Certificate containers are parsed locally; curve keys are validated by the shared API |
-| `virtual-yubihsm` | `rsa`, `signature` | RSA wire-key representation and an X.509 builder adapter which calls shared signing |
 | `virtual-yubihsm` | `getrandom`, `subtle` | Device challenges, nonces and secure-session comparisons |
 | `virtual-yubikey` | `getrandom`, `subtle` | Credential identifiers, protocol nonces and PIN/authentication comparisons |
 
 Curve and Ed25519 crates in consumers are test-only, except that `pkcs11rs`
-keeps P-256 as an optional ABI-test fixture dependency. Those tests provide an
-independent implementation against which the shared code is checked. No
-consumer retains a default production dependency on a curve implementation,
-or a direct AES, Triple-DES, CCM, CMAC, GHASH, HMAC, HKDF, PBKDF2, SHA-1,
-SHA-2, SHA-3 or ML-KEM dependency.
+keeps P-256 as an optional ABI-test fixture dependency. `virtual-yubihsm` also
+keeps RSA as a test-only dependency for an independent wire-format check, and
+`virtual-yubikey` keeps `signature` as a test-only verification trait. Those
+tests provide independent implementations against which the shared code is
+checked. Neither virtual device emulator retains a production RSA or
+`signature` dependency. No consumer retains a default production dependency on
+a curve implementation or a direct AES, Triple-DES, CCM, CMAC, GHASH, HMAC,
+HKDF, PBKDF2, SHA-1, SHA-2, SHA-3 or ML-KEM dependency.
 
 ## RSA implementation follow-up
 
