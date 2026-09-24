@@ -62,7 +62,8 @@ owned by the caller. Sharing and last-owner release are covered by clone-lifetim
 tests, including signing/decryption or decapsulation after the original is dropped.
 
 The optional `x509-signing` feature provides standard SubjectPublicKeyInfo
-projection and X.509 certificate-signing adapters for software keys. Callers
+projection and X.509 certificate-signing adapters for software keys, including
+ML-DSA certificate signatures. Callers
 retain certificate profiles, names, extensions, validity, serial-number policy,
 and protocol error mapping. The separate `x509-validation` feature provides
 strict certificate parsing, signature verification, and certificate-chain

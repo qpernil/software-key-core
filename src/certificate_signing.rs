@@ -49,7 +49,9 @@ impl CertificateSigner {
             SoftwarePublicKey::Ec { curve, .. } => curve.signature_scheme(),
             SoftwarePublicKey::Edwards { curve, .. } => curve.signature_scheme(),
             SoftwarePublicKey::Rsa { .. } => SignatureScheme::RsaPkcs1Sha256,
-            SoftwarePublicKey::MlDsa { .. } => return Err(X509SigningError),
+            SoftwarePublicKey::MlDsa { parameter_set, .. } => {
+                SignatureScheme::MlDsa(*parameter_set)
+            }
         };
         Ok(Self {
             key: key.clone(),
@@ -100,12 +102,12 @@ impl DynSignatureAlgorithmIdentifier for CertificateSigner {
                 ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"),
                 Some(Any::null()),
             ),
+            SignatureScheme::MlDsa(_) => (self.verifying_key.0.algorithm.oid, None),
             SignatureScheme::RsaPssSha256
             | SignatureScheme::RsaPssSha384
             | SignatureScheme::RsaPssSha512
             | SignatureScheme::RsaPkcs1Sha384
-            | SignatureScheme::RsaPkcs1Sha512
-            | SignatureScheme::MlDsa(_) => return Err(spki::Error::KeyMalformed),
+            | SignatureScheme::RsaPkcs1Sha512 => return Err(spki::Error::KeyMalformed),
         };
         Ok(AlgorithmIdentifierOwned { oid, parameters })
     }
@@ -209,7 +211,10 @@ fn ec_subject_public_key_info(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::software_signing::{KeyKind, ecdsa_signature_from_der};
+    use crate::{
+        post_quantum::MlDsaParameterSet,
+        software_signing::{KeyKind, ecdsa_signature_from_der},
+    };
 
     #[test]
     fn supported_key_families_have_standard_spki_and_signature_algorithms() {
@@ -233,6 +238,21 @@ mod tests {
                 KeyKind::Rsa { modulus_bits: 1024 },
                 "1.2.840.113549.1.1.1",
                 "1.2.840.113549.1.1.11",
+            ),
+            (
+                KeyKind::MlDsa(MlDsaParameterSet::MlDsa44),
+                "2.16.840.1.101.3.4.3.17",
+                "2.16.840.1.101.3.4.3.17",
+            ),
+            (
+                KeyKind::MlDsa(MlDsaParameterSet::MlDsa65),
+                "2.16.840.1.101.3.4.3.18",
+                "2.16.840.1.101.3.4.3.18",
+            ),
+            (
+                KeyKind::MlDsa(MlDsaParameterSet::MlDsa87),
+                "2.16.840.1.101.3.4.3.19",
+                "2.16.840.1.101.3.4.3.19",
             ),
         ];
 
@@ -263,5 +283,31 @@ mod tests {
         key.public_key()
             .verify_message(SignatureScheme::EcdsaP256Sha256, message, &raw)
             .unwrap();
+    }
+
+    #[test]
+    fn certificate_signer_emits_raw_ml_dsa_signatures() {
+        for parameter_set in [
+            MlDsaParameterSet::MlDsa44,
+            MlDsaParameterSet::MlDsa65,
+            MlDsaParameterSet::MlDsa87,
+        ] {
+            let key = SoftwareSigningKey::generate_for_kind(KeyKind::MlDsa(parameter_set)).unwrap();
+            let signer = CertificateSigner::from_key(&key).unwrap();
+            let message = b"certificate body";
+            let signature: CertificateSignature = signer.try_sign(message).unwrap();
+            let encoded = signature.to_bitstring().unwrap();
+            assert_eq!(
+                encoded.as_bytes().unwrap().len(),
+                parameter_set.signature_length()
+            );
+            key.public_key()
+                .verify_message(
+                    SignatureScheme::MlDsa(parameter_set),
+                    message,
+                    encoded.as_bytes().unwrap(),
+                )
+                .unwrap();
+        }
     }
 }
