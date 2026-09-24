@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [features]
+state-persistence = ["dep:libc"]
 x509-signing = ["dep:const-oid", "dep:der", "dep:spki"]
 x509-validation = ["dep:const-oid", "dep:der", "dep:spki", "dep:x509-cert", "dep:rustls-pki-types", "dep:webpki"]
 
@@ -54,3 +55,6 @@ subtle = "2.6.1"
 x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
 x448 = { version = "0.14.0-pre.12", default-features = false, features = ["static_secrets"] }
 zeroize = "1.9.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2.189", optional = true }

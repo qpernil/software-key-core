@@ -1,12 +1,14 @@
-//! Protocol-neutral software key operations.
+//! Protocol-neutral software key operations and opt-in durable-state mechanics.
 //!
 //! This crate provides reusable key generation, signing, verification, and key
 //! agreement without depending on a device protocol or provider API. The optional
+//! `state-persistence` feature provides Unix state-file locking, atomic writes,
+//! and batched or immediate durable mutation scheduling. The optional
 //! `x509-signing` feature provides standard SubjectPublicKeyInfo projection and
 //! certificate signing for software keys. The `x509-validation` feature provides
 //! certificate parsing and explicit-anchor chain validation. Protocol and provider
 //! layers retain responsibility for identifiers, certificate profiles and
-//! extensions, authorization policy, persistence, and error mapping.
+//! extensions, authorization policy, state formats, lifecycle, and error mapping.
 
 pub mod arkg;
 pub mod brainpool512;
@@ -23,6 +25,8 @@ pub mod software_key_agreement;
 pub mod software_private_key;
 pub mod software_signing;
 pub mod software_symmetric;
+#[cfg(all(unix, feature = "state-persistence"))]
+pub mod state_persistence;
 
 #[cfg(test)]
 mod zeroization_tests {

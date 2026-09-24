@@ -1,7 +1,8 @@
 # software-key-core
 
-`software-key-core` provides protocol-neutral software key operations shared by
-security-token providers and device emulators.
+`software-key-core` provides protocol-neutral software key operations and
+optional durable-state mechanics shared by security-token providers and device
+emulators.
 
 The crate owns reusable RSA, elliptic-curve, Ed25519 and X25519 key generation,
 public-key projection, signing, verification and raw key agreement. Its
@@ -79,13 +80,20 @@ seeds, scalars, RSA components, and PKCS#8 are boundary representations only.
 Private key allocations are zeroized on final-owner drop, and exported private
 bytes are returned in zeroizing buffers.
 
-It does not own device- or protocol-specific identifiers and encodings, PKCS #11
-types, device authorization, object lifecycle, persistence, transport framing,
+The opt-in Unix `state-persistence` feature provides an exclusive state-file
+lock, atomic mode-`0600` replacement with file and directory sync, and a
+background coordinator for immediate or batched writes, flushes, and failure
+reporting. Callers supply the state path and encoder. They retain the serialized
+format, state-file naming, restoration and factory policy, mutation decisions,
+and device lifecycle.
+
+The crate does not own device- or protocol-specific identifiers and encodings,
+PKCS #11 types, device authorization, object lifecycle, transport framing,
 session state, or protocol-specific error mapping. Standard X.509 SPKI and
-certificate-signature encoding are the deliberate shared exception; certificate
-profiles and extensions remain with callers. In particular, ARKG COSE/CBOR
-stays with the previewSign callers, and SCP03 session counters and message
-framing stay with the device/provider protocol layers.
+certificate-signature encoding are shared; certificate profiles and extensions
+remain with callers. In particular, ARKG COSE/CBOR stays with the previewSign
+callers, and SCP03 session counters and message framing stay with the
+device/provider protocol layers.
 
 The local consumers intentionally use dependency-by-path so each working
 directory directly represents the code being built:
