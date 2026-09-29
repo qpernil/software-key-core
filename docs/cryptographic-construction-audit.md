@@ -32,6 +32,7 @@ PKCS #11 parameter/error adapters in `pkcs11rs`:
 | ECDSA fixed-width/DER conversion | curve coordinate width | PIV and CTAP/FIDO paths |
 | HMAC, MGF1, X9.63, HKDF and PBKDF2-HMAC | selected shared digest | all providers and emulators |
 | ML-KEM | raw FIPS 203 key material | PKCS #11 software objects |
+| Concrete hybrid PQ/T KEMs (`draft-irtf-cfrg-concrete-hybrid-kems-04`) | inseparable 32-byte seed plus ML-KEM and ECDH primitives | PKCS #11, virtual PIV, and virtual YubiHSM |
 
 The shared APIs validate construction-level inputs, construct counters and
 authentication data, verify tags in constant time, erase unauthenticated

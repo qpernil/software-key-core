@@ -5,8 +5,8 @@
 //! remain with callers.
 
 use crate::{
-    post_quantum::MlKemPrivateKey, software_key_agreement::SoftwareMontgomeryKey,
-    software_signing::SoftwareSigningKey,
+    hybrid_kem::HybridKemPrivateKey, post_quantum::MlKemPrivateKey,
+    software_key_agreement::SoftwareMontgomeryKey, software_signing::SoftwareSigningKey,
 };
 use std::fmt;
 use zeroize::ZeroizeOnDrop;
@@ -17,6 +17,7 @@ pub enum SoftwarePrivateKey {
     Signing(SoftwareSigningKey),
     Montgomery(SoftwareMontgomeryKey),
     MlKem(MlKemPrivateKey),
+    HybridKem(HybridKemPrivateKey),
 }
 
 // Every variant owns a typed key whose secret state is cleared on drop.
@@ -30,6 +31,10 @@ impl fmt::Debug for SoftwarePrivateKey {
             Self::MlKem(key) => formatter
                 .debug_struct("MlKem")
                 .field("parameter_set", &key.parameter_set())
+                .finish_non_exhaustive(),
+            Self::HybridKem(key) => formatter
+                .debug_struct("HybridKem")
+                .field("construction", &key.construction())
                 .finish_non_exhaustive(),
         }
     }
@@ -50,6 +55,12 @@ impl From<SoftwareMontgomeryKey> for SoftwarePrivateKey {
 impl From<MlKemPrivateKey> for SoftwarePrivateKey {
     fn from(key: MlKemPrivateKey) -> Self {
         Self::MlKem(key)
+    }
+}
+
+impl From<HybridKemPrivateKey> for SoftwarePrivateKey {
+    fn from(key: HybridKemPrivateKey) -> Self {
+        Self::HybridKem(key)
     }
 }
 
