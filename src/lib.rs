@@ -18,6 +18,7 @@ pub mod certificate_chain;
 pub mod certificate_signing;
 pub mod counter_kdf;
 pub mod digest;
+pub mod hybrid_kem;
 pub mod post_quantum;
 pub mod rsa_signing;
 pub mod secure_channel;
@@ -31,6 +32,7 @@ pub mod state_persistence;
 #[cfg(test)]
 mod zeroization_tests {
     use super::{
+        hybrid_kem::HybridKemPrivateKey,
         post_quantum::{MlDsaPrivateKey, MlKemPrivateKey},
         software_key_agreement::SoftwareMontgomeryKey,
         software_private_key::SoftwarePrivateKey,
@@ -46,6 +48,7 @@ mod zeroization_tests {
         assert_zeroize_on_drop::<SoftwareMontgomeryKey>();
         assert_zeroize_on_drop::<MlDsaPrivateKey>();
         assert_zeroize_on_drop::<MlKemPrivateKey>();
+        assert_zeroize_on_drop::<HybridKemPrivateKey>();
         assert_zeroize_on_drop::<SoftwarePrivateKey>();
     }
 }

@@ -61,6 +61,26 @@ is zeroized when its last owner is dropped; object metadata and policy remain
 owned by the caller. Sharing and last-owner release are covered by clone-lifetime
 tests, including signing/decryption or decapsulation after the original is dropped.
 
+### Concrete hybrid KEM specification profile
+
+The `hybrid_kem` module implements exactly
+`draft-irtf-cfrg-concrete-hybrid-kems-04` (6 July 2026), with the generic CG
+framework fixed by `draft-irtf-cfrg-hybrid-kems-12`. The three supported
+constructions are `MLKEM768-P256`, `MLKEM768-X25519`, and
+`MLKEM1024-P384`; the X25519 construction is byte-for-byte the X-Wing
+construction in `draft-connolly-cfrg-xwing-kem-10`.
+
+The component specifications are FIPS 203 for ML-KEM, FIPS 202 for SHAKE256
+and SHA3-256, SEC 1 version 2.0 uncompressed point encoding for P-256/P-384,
+and RFC 7748 for X25519. Public keys are `ek_PQ || ek_T`, ciphertexts are
+`ct_PQ || ct_T`, and the combiner returns 32 bytes. The respective public-key
+lengths are 1249, 1216, and 1665 bytes; ciphertext lengths are 1153, 1120, and
+1665 bytes. A private key is the draft's single 32-byte seed. The library
+derives both components internally and never exposes either private component
+as a separately usable key. Official draft-04 vectors cover all three
+constructions, alongside malformed-point, non-contributory-X25519, and
+cross-construction rejection tests.
+
 The optional `x509-signing` feature provides standard SubjectPublicKeyInfo
 projection and X.509 certificate-signing adapters for software keys, including
 ML-DSA certificate signatures. Callers

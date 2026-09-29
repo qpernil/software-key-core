@@ -217,6 +217,17 @@ pub fn ml_kem_encapsulate(
 ) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), MlKemError> {
     let mut randomness = Zeroizing::new([0u8; 32]);
     getrandom::fill(randomness.as_mut()).map_err(|_| MlKemError::RandomnessUnavailable)?;
+    ml_kem_encapsulate_deterministic(parameter_set, public_key, &randomness)
+}
+
+/// Deterministic FIPS 203 encapsulation used by composite KEM constructions
+/// and known-answer tests. Protocol callers should normally use
+/// [`ml_kem_encapsulate`].
+pub fn ml_kem_encapsulate_deterministic(
+    parameter_set: MlKemParameterSet,
+    public_key: &[u8],
+    randomness: &[u8; 32],
+) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), MlKemError> {
     macro_rules! encapsulate {
         ($params:ty) => {{
             let encoded =
