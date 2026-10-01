@@ -249,6 +249,21 @@ macro_rules! verify_generic_ecdsa_prehash {
     }};
 }
 
+// RFC 8032 requires a canonical point encoding. The dependency's decoder
+// ignores unused bits, so check re-encoding before accepting A or R.
+fn canonical_ed448_point(encoded: &[u8]) -> bool {
+    let Ok(bytes) = <[u8; 57]>::try_from(encoded) else {
+        return false;
+    };
+    let Some(point) = ed448_goldilocks::CompressedEdwardsY(bytes)
+        .decompress()
+        .into_option()
+    else {
+        return false;
+    };
+    point.compress().as_bytes() == &bytes
+}
+
 impl SoftwarePublicKey {
     /// Validate that the encoded public key is structurally valid and belongs
     /// to the declared algorithm family.
@@ -296,6 +311,9 @@ impl SoftwarePublicKey {
                     .as_slice()
                     .try_into()
                     .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
+                if !canonical_ed448_point(public_key) {
+                    return Err(SoftwareSigningError::InvalidPublicKey);
+                }
                 ed448_goldilocks::VerifyingKey::from_bytes(public)
                     .map(|_| ())
                     .map_err(|_| SoftwareSigningError::InvalidPublicKey)
@@ -454,6 +472,12 @@ impl SoftwarePublicKey {
                     .as_slice()
                     .try_into()
                     .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
+                if !canonical_ed448_point(public_key) {
+                    return Err(SoftwareSigningError::InvalidPublicKey);
+                }
+                if signature.len() != 114 || !canonical_ed448_point(&signature[..57]) {
+                    return Err(SoftwareSigningError::InvalidSignature);
+                }
                 let key = ed448_goldilocks::VerifyingKey::from_bytes(public)
                     .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
                 let signature = ed448_goldilocks::Signature::try_from(signature)

@@ -52,3 +52,6 @@ mod zeroization_tests {
         assert_zeroize_on_drop::<SoftwarePrivateKey>();
     }
 }
+
+#[cfg(test)]
+mod kat;

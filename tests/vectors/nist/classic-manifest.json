@@ -1,0 +1,64 @@
+[
+  {
+    "archive": "KAT_TDES.zip",
+    "sourceSha256": "19d8841f84ae3415350b069a4768bd416c05a0533ee43e905ab099adb8ccb374",
+    "cases": 940,
+    "sourceFiles": [
+      "KAT_TDES/TCBCinvperm.rsp",
+      "KAT_TDES/TCBCpermop.rsp",
+      "KAT_TDES/TCBCsubtab.rsp",
+      "KAT_TDES/TCBCvarkey.rsp",
+      "KAT_TDES/TCBCvartext.rsp",
+      "KAT_TDES/TECBinvperm.rsp",
+      "KAT_TDES/TECBpermop.rsp",
+      "KAT_TDES/TECBsubtab.rsp",
+      "KAT_TDES/TECBvarkey.rsp",
+      "KAT_TDES/TECBvartext.rsp"
+    ]
+  },
+  {
+    "archive": "shabytetestvectors.zip",
+    "sourceSha256": "929ef80b7b3418aca026643f6f248815913b60e01741a44bba9e118067f4c9b8",
+    "cases": 901,
+    "sourceFiles": [
+      "shabytetestvectors/SHA1LongMsg.rsp",
+      "shabytetestvectors/SHA1ShortMsg.rsp",
+      "shabytetestvectors/SHA224LongMsg.rsp",
+      "shabytetestvectors/SHA224ShortMsg.rsp",
+      "shabytetestvectors/SHA256LongMsg.rsp",
+      "shabytetestvectors/SHA256ShortMsg.rsp",
+      "shabytetestvectors/SHA384LongMsg.rsp",
+      "shabytetestvectors/SHA384ShortMsg.rsp",
+      "shabytetestvectors/SHA512LongMsg.rsp",
+      "shabytetestvectors/SHA512ShortMsg.rsp"
+    ]
+  },
+  {
+    "archive": "sha-3bytetestvectors.zip",
+    "sourceSha256": "cd07701af2e47f5cc889d642528b4bf11f8b6eb55797c7307a96828ed8d8fc8c",
+    "cases": 860,
+    "sourceFiles": [
+      "SHA3_224LongMsg.rsp",
+      "SHA3_224ShortMsg.rsp",
+      "SHA3_256LongMsg.rsp",
+      "SHA3_256ShortMsg.rsp",
+      "SHA3_384LongMsg.rsp",
+      "SHA3_384ShortMsg.rsp",
+      "SHA3_512LongMsg.rsp",
+      "SHA3_512ShortMsg.rsp"
+    ]
+  },
+  {
+    "archive": "shakebytetestvectors.zip",
+    "sourceSha256": "debfebc3157b3ceea002b84ca38476420389a3bf7e97dc5f53ea4689a16de4c7",
+    "cases": 824,
+    "sourceFiles": [
+      "SHAKE128LongMsg.rsp",
+      "SHAKE128ShortMsg.rsp",
+      "SHAKE128VariableOut.rsp",
+      "SHAKE256LongMsg.rsp",
+      "SHAKE256ShortMsg.rsp",
+      "SHAKE256VariableOut.rsp"
+    ]
+  }
+]
