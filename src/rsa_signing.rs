@@ -417,7 +417,7 @@ pub fn rsa_decrypt_oaep_digest(
     label_digest: &[u8],
     mgf_hash: RsaHashAlgorithm,
 ) -> Result<Vec<u8>, RsaConstructionError> {
-    if ciphertext.len() != key.size() || !matches!(label_digest.len(), 20 | 32 | 48 | 64) {
+    if ciphertext.len() != key.size() || !matches!(label_digest.len(), 20 | 28 | 32 | 48 | 64) {
         return Err(RsaConstructionError::InputTooLong);
     }
     rsa_oaep_unpad_digest(&private_operation(key, ciphertext)?, label_digest, mgf_hash)
@@ -429,7 +429,7 @@ pub fn rsa_encrypt_oaep_digest(
     label_digest: &[u8],
     mgf_hash: RsaHashAlgorithm,
 ) -> Result<Vec<u8>, RsaConstructionError> {
-    if !matches!(label_digest.len(), 20 | 32 | 48 | 64) {
+    if !matches!(label_digest.len(), 20 | 28 | 32 | 48 | 64) {
         return Err(RsaConstructionError::InvalidDigestLength);
     }
     public_operation(

@@ -138,8 +138,13 @@ software-key-core
 Run the standalone test suite with:
 
 ```console
-cargo test
+cargo test --locked
+cargo test --locked kat_
 ```
+
+The [published known-answer test coverage](docs/known-answer-tests.md) includes
+FIPS 203/204 for every parameter set, NIST SHA/Triple-DES and Wycheproof
+classical signature, agreement, MAC, KDF, AEAD and key-wrap corpora.
 
 The crate is not currently published. Consumers should continue using the
 local path until repository and release metadata are established.
