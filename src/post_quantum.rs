@@ -461,6 +461,42 @@ impl MlDsaPrivateKey {
         }
     }
 
+    /// Sign an already hashed message using FIPS 204 HashML-DSA.
+    pub fn sign_prehash(
+        &self,
+        digest: &[u8],
+        context: &[u8],
+        hash: MlDsaPrehash,
+        randomization: MlDsaRandomization,
+    ) -> Result<Vec<u8>, MlDsaError> {
+        let message = hash.encode(digest, context)?;
+        let mut randomizer = Zeroizing::new([0u8; 32]);
+        if randomization != MlDsaRandomization::Deterministic
+            && getrandom::fill(randomizer.as_mut()).is_err()
+        {
+            if randomization == MlDsaRandomization::Randomized {
+                return Err(MlDsaError::RandomnessUnavailable);
+            }
+            // A failed RNG may have partially filled the buffer.
+            *randomizer = [0; 32];
+        }
+        let rnd = (*randomizer).into();
+        macro_rules! sign {
+            ($key:expr) => {
+                Ok($key
+                    .expanded_key()
+                    .sign_internal(&[&message], &rnd)
+                    .encode()
+                    .to_vec())
+            };
+        }
+        match self {
+            Self::MlDsa44(key) => sign!(key),
+            Self::MlDsa65(key) => sign!(key),
+            Self::MlDsa87(key) => sign!(key),
+        }
+    }
+
     /// Produce a randomized FIPS 204 signature, falling back to the permitted
     /// deterministic variant if the operating-system RNG is unavailable.
     pub fn sign_hedged(&self, message: &[u8], context: &[u8]) -> Result<Vec<u8>, MlDsaError> {
@@ -473,6 +509,118 @@ impl MlDsaPrivateKey {
         context: &[u8],
     ) -> Result<Vec<u8>, MlDsaError> {
         self.sign(message, context, MlDsaRandomization::Deterministic)
+    }
+}
+
+/// FIPS 204 prehash identifiers: the final arc of the NIST hash OID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MlDsaPrehash(u8);
+
+impl MlDsaPrehash {
+    pub fn from_id(id: u8) -> Option<Self> {
+        matches!(id, 1..=4 | 7..=12).then_some(Self(id))
+    }
+    pub const fn id(self) -> u8 {
+        self.0
+    }
+    pub const fn digest_length(self) -> usize {
+        match self.0 {
+            4 | 7 => 28,
+            1 | 8 | 11 => 32,
+            2 | 9 => 48,
+            _ => 64,
+        }
+    }
+    /// Incremental prehash state for caller-side message hashing.
+    pub fn context(self) -> MlDsaPrehashContext {
+        use crate::digest::{HashAlgorithm, HashContext};
+        let state = match self.0 {
+            11 => MlDsaPrehashState::Shake128(sha3::Shake128::default()),
+            12 => MlDsaPrehashState::Shake256(sha3::Shake256::default()),
+            id => {
+                let algorithm = match id {
+                    1 => HashAlgorithm::Sha256,
+                    2 => HashAlgorithm::Sha384,
+                    3 => HashAlgorithm::Sha512,
+                    4 => HashAlgorithm::Sha224,
+                    7 => HashAlgorithm::Sha3_224,
+                    8 => HashAlgorithm::Sha3_256,
+                    9 => HashAlgorithm::Sha3_384,
+                    _ => HashAlgorithm::Sha3_512,
+                };
+                MlDsaPrehashState::Hash(HashContext::new(algorithm))
+            }
+        };
+        MlDsaPrehashContext { hash: self, state }
+    }
+
+    /// Compute the FIPS 204 prehash outside the signing device.
+    pub fn digest(self, message: &[u8]) -> Vec<u8> {
+        let mut context = self.context();
+        context.update(message);
+        context.finalize()
+    }
+
+    /// HashML-DSA's domain-separated input to ML-DSA.Sign_internal.
+    pub fn encode(self, digest: &[u8], context: &[u8]) -> Result<Vec<u8>, MlDsaError> {
+        if context.len() > 255 {
+            return Err(MlDsaError::InvalidContext);
+        }
+        if digest.len() != self.digest_length() {
+            return Err(MlDsaError::InvalidSignature);
+        }
+        let mut message = vec![1, context.len() as u8];
+        message.extend_from_slice(context);
+        message.extend_from_slice(&[
+            0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, self.0,
+        ]);
+        message.extend_from_slice(digest);
+        Ok(message)
+    }
+}
+
+/// Fixed-size, cloneable state for HashML-DSA prehashing.
+#[derive(Clone)]
+pub struct MlDsaPrehashContext {
+    hash: MlDsaPrehash,
+    state: MlDsaPrehashState,
+}
+
+#[derive(Clone)]
+enum MlDsaPrehashState {
+    Hash(crate::digest::HashContext),
+    Shake128(sha3::Shake128),
+    Shake256(sha3::Shake256),
+}
+
+impl fmt::Debug for MlDsaPrehashContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MlDsaPrehashContext")
+            .field("hash", &self.hash)
+            .finish_non_exhaustive()
+    }
+}
+
+impl MlDsaPrehashContext {
+    pub fn update(&mut self, message: &[u8]) {
+        use sha3::digest::Update;
+        match &mut self.state {
+            MlDsaPrehashState::Hash(hash) => hash.update(message),
+            MlDsaPrehashState::Shake128(hash) => hash.update(message),
+            MlDsaPrehashState::Shake256(hash) => hash.update(message),
+        }
+    }
+
+    pub fn finalize(self) -> Vec<u8> {
+        use sha3::digest::{ExtendableOutput, XofReader};
+        let mut output = vec![0; self.hash.digest_length()];
+        match self.state {
+            MlDsaPrehashState::Hash(hash) => return hash.finalize(),
+            MlDsaPrehashState::Shake128(hash) => hash.finalize_xof().read(&mut output),
+            MlDsaPrehashState::Shake256(hash) => hash.finalize_xof().read(&mut output),
+        }
+        output
     }
 }
 
@@ -494,6 +642,39 @@ pub fn verify_ml_dsa(
             let signature = Signature::<$params>::try_from(signature)
                 .map_err(|_| MlDsaError::InvalidSignature)?;
             if key.verify_with_context(message, context, &signature) {
+                Ok(())
+            } else {
+                Err(MlDsaError::InvalidSignature)
+            }
+        }};
+    }
+    match parameter_set {
+        MlDsaParameterSet::MlDsa44 => verify!(MlDsa44),
+        MlDsaParameterSet::MlDsa65 => verify!(MlDsa65),
+        MlDsaParameterSet::MlDsa87 => verify!(MlDsa87),
+    }
+}
+
+pub fn verify_ml_dsa_prehash(
+    parameter_set: MlDsaParameterSet,
+    public_key: &[u8],
+    message: &[u8],
+    context: &[u8],
+    signature: &[u8],
+    hash: MlDsaPrehash,
+) -> Result<(), MlDsaError> {
+    if context.len() > 255 {
+        return Err(MlDsaError::InvalidContext);
+    }
+    let message = hash.encode(message, context)?;
+    macro_rules! verify {
+        ($params:ty) => {{
+            let encoded = EncodedVerifyingKey::<$params>::try_from(public_key)
+                .map_err(|_| MlDsaError::InvalidPublicKey)?;
+            let key = ::ml_dsa::VerifyingKey::<$params>::decode(&encoded);
+            let signature = Signature::<$params>::try_from(signature)
+                .map_err(|_| MlDsaError::InvalidSignature)?;
+            if key.verify_internal(&message, &signature) {
                 Ok(())
             } else {
                 Err(MlDsaError::InvalidSignature)
@@ -552,6 +733,208 @@ pub fn ml_dsa_public_key_info(
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn ml_dsa_prehash_streaming_preserves_cloned_state_and_chunk_boundaries() {
+        let message = vec![0x42; 8193];
+        for id in [1, 2, 3, 4, 7, 8, 9, 10, 11, 12] {
+            let hash = MlDsaPrehash::from_id(id).unwrap();
+            for chunk_size in [1, 7, 64, 136, 168, 1024] {
+                let mut state = hash.context();
+                state.update(&[]);
+                for part in message.chunks(chunk_size) {
+                    state.update(part);
+                }
+                assert_eq!(state.clone().finalize(), hash.digest(&message));
+                assert_eq!(state.finalize(), hash.digest(&message));
+            }
+            assert_eq!(hash.context().finalize(), hash.digest(&[]));
+        }
+    }
+
+    #[test]
+    fn ml_dsa_prehash_matches_independent_hashlib_vectors() {
+        assert_eq!(
+            MlDsaPrehash::from_id(1).unwrap().digest(b"abc"),
+            vec![
+                186, 120, 22, 191, 143, 1, 207, 234, 65, 65, 64, 222, 93, 174, 34, 35, 176, 3, 97,
+                163, 150, 23, 122, 156, 180, 16, 255, 97, 242, 0, 21, 173
+            ]
+        );
+        assert_eq!(
+            MlDsaPrehash::from_id(2).unwrap().digest(b"abc"),
+            vec![
+                203, 0, 117, 63, 69, 163, 94, 139, 181, 160, 61, 105, 154, 198, 80, 7, 39, 44, 50,
+                171, 14, 222, 209, 99, 26, 139, 96, 90, 67, 255, 91, 237, 128, 134, 7, 43, 161,
+                231, 204, 35, 88, 186, 236, 161, 52, 200, 37, 167
+            ]
+        );
+        assert_eq!(
+            MlDsaPrehash::from_id(3).unwrap().digest(b"abc"),
+            vec![
+                221, 175, 53, 161, 147, 97, 122, 186, 204, 65, 115, 73, 174, 32, 65, 49, 18, 230,
+                250, 78, 137, 169, 126, 162, 10, 158, 238, 230, 75, 85, 211, 154, 33, 146, 153, 42,
+                39, 79, 193, 168, 54, 186, 60, 35, 163, 254, 235, 189, 69, 77, 68, 35, 100, 60,
+                232, 14, 42, 154, 201, 79, 165, 76, 164, 159
+            ]
+        );
+        assert_eq!(
+            MlDsaPrehash::from_id(4).unwrap().digest(b"abc"),
+            vec![
+                35, 9, 125, 34, 52, 5, 216, 34, 134, 66, 164, 119, 189, 162, 85, 179, 42, 173, 188,
+                228, 189, 160, 179, 247, 227, 108, 157, 167
+            ]
+        );
+        assert_eq!(
+            MlDsaPrehash::from_id(7).unwrap().digest(b"abc"),
+            vec![
+                230, 66, 130, 76, 63, 140, 242, 74, 208, 146, 52, 238, 125, 60, 118, 111, 201, 163,
+                165, 22, 141, 12, 148, 173, 115, 180, 111, 223
+            ]
+        );
+        assert_eq!(
+            MlDsaPrehash::from_id(8).unwrap().digest(b"abc"),
+            vec![
+                58, 152, 93, 167, 79, 226, 37, 178, 4, 92, 23, 45, 107, 211, 144, 189, 133, 95, 8,
+                110, 62, 157, 82, 91, 70, 191, 226, 69, 17, 67, 21, 50
+            ]
+        );
+        assert_eq!(
+            MlDsaPrehash::from_id(9).unwrap().digest(b"abc"),
+            vec![
+                236, 1, 73, 130, 136, 81, 111, 201, 38, 69, 159, 88, 226, 198, 173, 141, 249, 180,
+                115, 203, 15, 192, 140, 37, 150, 218, 124, 240, 228, 155, 228, 178, 152, 216, 140,
+                234, 146, 122, 199, 245, 57, 241, 237, 242, 40, 55, 109, 37
+            ]
+        );
+        assert_eq!(
+            MlDsaPrehash::from_id(10).unwrap().digest(b"abc"),
+            vec![
+                183, 81, 133, 11, 26, 87, 22, 138, 86, 147, 205, 146, 75, 107, 9, 110, 8, 246, 33,
+                130, 116, 68, 247, 13, 136, 79, 93, 2, 64, 210, 113, 46, 16, 225, 22, 233, 25, 42,
+                243, 201, 26, 126, 197, 118, 71, 227, 147, 64, 87, 52, 11, 76, 244, 8, 213, 165,
+                101, 146, 248, 39, 78, 236, 83, 240
+            ]
+        );
+        assert_eq!(
+            MlDsaPrehash::from_id(11).unwrap().digest(b"abc"),
+            vec![
+                88, 129, 9, 45, 216, 24, 191, 92, 248, 163, 221, 183, 147, 251, 203, 167, 64, 151,
+                213, 197, 38, 166, 211, 95, 151, 184, 51, 81, 148, 15, 44, 200
+            ]
+        );
+        assert_eq!(
+            MlDsaPrehash::from_id(12).unwrap().digest(b"abc"),
+            vec![
+                72, 51, 102, 96, 19, 96, 168, 119, 28, 104, 99, 8, 12, 196, 17, 77, 141, 180, 69,
+                48, 248, 241, 225, 238, 79, 148, 234, 55, 231, 139, 87, 57, 213, 161, 91, 239, 24,
+                106, 83, 134, 199, 87, 68, 192, 82, 126, 31, 170, 159, 135, 38, 228, 98, 161, 42,
+                79, 235, 6, 189, 136, 1, 231, 81, 228
+            ]
+        );
+    }
+
+    #[test]
+    fn hash_ml_dsa_domain_separation_and_digest_lengths() {
+        for parameter_set in [
+            MlDsaParameterSet::MlDsa44,
+            MlDsaParameterSet::MlDsa65,
+            MlDsaParameterSet::MlDsa87,
+        ] {
+            let key = MlDsaPrivateKey::from_seed(parameter_set, [7; 32]);
+            for id in [1, 2, 3, 4, 7, 8, 9, 10, 11, 12] {
+                let hash = MlDsaPrehash::from_id(id).unwrap();
+                let digest = vec![0x42; hash.digest_length()];
+                let signature = key
+                    .sign_prehash(&digest, b"context", hash, MlDsaRandomization::Deterministic)
+                    .unwrap();
+                verify_ml_dsa_prehash(
+                    parameter_set,
+                    &key.public_key(),
+                    &digest,
+                    b"context",
+                    &signature,
+                    hash,
+                )
+                .unwrap();
+                assert!(
+                    verify_ml_dsa(
+                        parameter_set,
+                        &key.public_key(),
+                        &digest,
+                        b"context",
+                        &signature
+                    )
+                    .is_err()
+                );
+                assert!(
+                    verify_ml_dsa_prehash(
+                        parameter_set,
+                        &key.public_key(),
+                        &digest,
+                        b"other",
+                        &signature,
+                        hash
+                    )
+                    .is_err()
+                );
+                assert!(
+                    key.sign_prehash(
+                        &digest[..digest.len() - 1],
+                        b"context",
+                        hash,
+                        MlDsaRandomization::Deterministic
+                    )
+                    .is_err()
+                );
+                assert!(
+                    key.sign_prehash(&digest, &[0; 256], hash, MlDsaRandomization::Deterministic)
+                        .is_err()
+                );
+                for context in [&[][..], &[0x61; 255][..]] {
+                    let signature = key
+                        .sign_prehash(&digest, context, hash, MlDsaRandomization::Deterministic)
+                        .unwrap();
+                    verify_ml_dsa_prehash(
+                        parameter_set,
+                        &key.public_key(),
+                        &digest,
+                        context,
+                        &signature,
+                        hash,
+                    )
+                    .unwrap();
+                }
+                // Independent construction of FIPS 204 Algorithm 4's M-prime.
+                let mut encoded = vec![
+                    1, 7, b'c', b'o', b'n', b't', b'e', b'x', b't', 6, 9, 0x60, 0x86, 0x48, 1,
+                    0x65, 3, 4, 2, id,
+                ];
+                encoded.extend_from_slice(&digest);
+                let rnd = [0; 32].into();
+                let expected = match &key {
+                    MlDsaPrivateKey::MlDsa44(key) => key
+                        .expanded_key()
+                        .sign_internal(&[&encoded], &rnd)
+                        .encode()
+                        .to_vec(),
+                    MlDsaPrivateKey::MlDsa65(key) => key
+                        .expanded_key()
+                        .sign_internal(&[&encoded], &rnd)
+                        .encode()
+                        .to_vec(),
+                    MlDsaPrivateKey::MlDsa87(key) => key
+                        .expanded_key()
+                        .sign_internal(&[&encoded], &rnd)
+                        .encode()
+                        .to_vec(),
+                };
+                assert_eq!(signature, expected);
+            }
+        }
+        assert!(MlDsaPrehash::from_id(0).is_none());
+        assert!(MlDsaPrehash::from_id(5).is_none());
+    }
 
     #[test]
     fn ml_kem_clones_share_key_material_until_the_last_owner_drops() {

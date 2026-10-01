@@ -61,6 +61,13 @@ is zeroized when its last owner is dropped; object metadata and policy remain
 owned by the caller. Sharing and last-owner release are covered by clone-lifetime
 tests, including signing/decryption or decapsulation after the original is dropped.
 
+`MlDsaPrivateKey::sign_prehash` and `verify_ml_dsa_prehash` implement FIPS 204
+HashML-DSA for caller-computed digests. `MlDsaPrehash` validates SHA-2, SHA-3,
+and SHAKE digest lengths and constructs the domain separator, context, and DER
+hash OID. Pure ML-DSA uses the existing message operations. Context length is
+0–255 bytes inclusive for both modes. `MlDsaPrehash::context` exposes clonable
+incremental SHA-2/SHA-3/SHAKE hashing; `digest` supplies the one-shot equivalent.
+
 ### Concrete hybrid KEM specification profile
 
 The `hybrid_kem` module implements exactly
