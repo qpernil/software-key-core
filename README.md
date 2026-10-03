@@ -113,7 +113,9 @@ lock, atomic mode-`0600` replacement with file and directory sync, and a
 background coordinator for immediate or batched writes, flushes, and failure
 reporting. Callers supply the state path and encoder. They retain the serialized
 format, state-file naming, restoration and factory policy, mutation decisions,
-and device lifecycle.
+and device lifecycle. The lock guard explicitly releases the kernel lock on
+drop, so a descriptor inherited during subprocess creation cannot delay state
+reopening after shutdown. The separate lock file remains on disk.
 
 The crate does not own device- or protocol-specific identifiers and encodings,
 PKCS #11 types, device authorization, object lifecycle, transport framing,
