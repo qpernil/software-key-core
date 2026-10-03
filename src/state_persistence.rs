@@ -26,7 +26,8 @@ pub enum PersistenceMode {
 ///
 /// The lock file is deliberately separate from atomically replaced state
 /// files. Keep this value alive from before state restoration until after the
-/// final persistence flush.
+/// final persistence flush. Drop explicitly releases the kernel lock so a
+/// descriptor inherited by a subprocess cannot extend the owner's lifetime.
 #[must_use = "the state lock must be held for the entire persistence lifetime"]
 #[derive(Debug)]
 pub struct StateLock {
@@ -54,6 +55,23 @@ impl StateLock {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+impl Drop for StateLock {
+    fn drop(&mut self) {
+        // Closing only this descriptor can leave flock held by a descriptor
+        // inherited during another thread's fork/exec. End the guard's lock
+        // ownership explicitly before File closes its descriptor.
+        loop {
+            // SAFETY: the owned File remains open for the entire destructor.
+            if unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) } == 0 {
+                break;
+            }
+            if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                break;
+            }
+        }
     }
 }
 
@@ -475,6 +493,39 @@ mod tests {
         drop(second);
         assert!(path.exists());
 
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn state_lock_releases_while_an_inherited_descriptor_remains_open() {
+        use std::os::fd::FromRawFd;
+
+        let directory = std::env::temp_dir().join(format!(
+            "software-key-core-state-lock-inherited-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("device.lock");
+        let first = StateLock::acquire(path.clone()).unwrap();
+        // dup retains the same open file description that a forked child
+        // inherits before exec closes its close-on-exec descriptors.
+        // SAFETY: first owns a valid descriptor; dup creates a separate owned handle.
+        let descriptor = unsafe { libc::dup(first._file.as_raw_fd()) };
+        assert!(descriptor >= 0, "duplicate the owned lock descriptor");
+        // SAFETY: dup returned a new descriptor; this File owns it exclusively.
+        let inherited = unsafe { File::from_raw_fd(descriptor) };
+
+        drop(first);
+        let reacquired = StateLock::acquire(path.clone());
+        // Release the duplicate before asserting so failure also cleans up.
+        drop(inherited);
+        let second = reacquired.expect("owner shutdown must release the lock before child exec");
+        assert_eq!(
+            StateLock::acquire(path).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(second);
         fs::remove_dir_all(directory).unwrap();
     }
 
