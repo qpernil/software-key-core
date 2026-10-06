@@ -2,7 +2,7 @@
 name = "software-key-core"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.95"
 description = "Protocol-neutral software key operations shared by security-token providers and emulators"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
