@@ -114,9 +114,9 @@ background coordinator for immediate or batched writes, flushes, and failure
 reporting. Callers supply the state path and encoder, or use
 `StatePersistence::start_with_writer` to supply a durable writer for a batch of
 independent records. A successful writer must complete every write in its
-snapshot before acknowledging the corresponding mutation epochs. They retain the serialized
-format, state-file naming, restoration and factory policy, mutation decisions,
-and device lifecycle. The lock guard explicitly releases the kernel lock on
+snapshot before acknowledging the corresponding mutation epochs. Callers retain
+the serialized format, state-file naming, restoration and factory policy,
+mutation decisions, and device lifecycle. The lock guard explicitly releases the kernel lock on
 drop, so a descriptor inherited during subprocess creation cannot delay state
 reopening after shutdown. The separate lock file remains on disk.
 
@@ -139,6 +139,8 @@ software-key-core
 ```
 
 ## Development
+
+Rust 1.95 or newer is required. CI checks that minimum as well as stable Rust.
 
 Run the standalone test suite with:
 
