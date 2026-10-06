@@ -184,7 +184,12 @@ impl<T: Send + 'static> StatePersistence<T> {
         )
     }
 
-    fn start_with_writer<E, W, F>(
+    /// Start one scheduler with a caller-supplied durable writer.
+    ///
+    /// The writer must complete all writes represented by the encoded snapshot
+    /// before returning success. A failure stops scheduling and fails outstanding
+    /// receipts, just as with the built-in atomic single-file writer.
+    pub fn start_with_writer<E, W, F>(
         state: T,
         mode: PersistenceMode,
         encode: E,

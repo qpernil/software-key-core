@@ -111,7 +111,10 @@ bytes are returned in zeroizing buffers.
 The opt-in Unix `state-persistence` feature provides an exclusive state-file
 lock, atomic mode-`0600` replacement with file and directory sync, and a
 background coordinator for immediate or batched writes, flushes, and failure
-reporting. Callers supply the state path and encoder. They retain the serialized
+reporting. Callers supply the state path and encoder, or use
+`StatePersistence::start_with_writer` to supply a durable writer for a batch of
+independent records. A successful writer must complete every write in its
+snapshot before acknowledging the corresponding mutation epochs. They retain the serialized
 format, state-file naming, restoration and factory policy, mutation decisions,
 and device lifecycle. The lock guard explicitly releases the kernel lock on
 drop, so a descriptor inherited during subprocess creation cannot delay state
