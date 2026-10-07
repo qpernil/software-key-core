@@ -14,9 +14,9 @@ A protocol-neutral construction belongs here when it can operate over a
 capability supplied by either software or hardware. GCM over a caller-supplied
 128-bit block-encryption capability is the model example.
 
-## Moved from `pkcs11rs`
+## Shared constructions
 
-The following constructions now live in `software-key-core` and retain thin
+The following constructions live in `software-key-core` and use thin
 PKCS #11 parameter/error adapters in `pkcs11rs`:
 
 | Construction | Shared lower-level capability | Hardware use |
@@ -24,7 +24,8 @@ PKCS #11 parameter/error adapters in `pkcs11rs`:
 | GCM and GMAC | 128-bit block encryption | YubiHSM AES ECB commands |
 | CTR | block encryption | YubiHSM AES ECB commands |
 | CCM | 128-bit block encryption and CBC-MAC | YubiHSM AES ECB/CBC commands |
-| CMAC | 64- or 128-bit block encryption | YubiHSM AES ECB commands |
+| CMAC | 64- or 128-bit block encryption; optional prepared-message CBC | YubiHSM AES ECB, or ECB plus one unpadded zero-IV CBC command |
+| SP 800-108 counter KDF | caller-supplied AES-CMAC | Protected provider keys through native CMAC or AES ECB/CBC |
 | CBC | block encryption/decryption | software AES and Triple-DES adapters |
 | RFC 3394/5649 key wrapping | 128-bit block encryption/decryption | YubiHSM AES ECB commands |
 | PKCS #7 padding | block length | PKCS #11 AES/Triple-DES mechanisms |
@@ -42,7 +43,7 @@ mapping.
 
 ## Shared algorithm adapters
 
-These responsibilities were already in `software-key-core` before this audit:
+The key-based adapters and shared primitives cover:
 
 - raw AES ECB and Triple-DES ECB, plus convenience adapters for the shared
   block constructions;
@@ -55,7 +56,7 @@ These responsibilities were already in `software-key-core` before this audit:
 - ML-KEM and ML-DSA key operations and serialization.
 
 All supported ECDSA curves, Ed25519 signing and verification, X25519, and
-Weierstrass ECDH now cross the same shared key boundary. Static and ephemeral
+Weierstrass ECDH cross the same shared key boundary. Static and ephemeral
 P-256 agreement use the same `SoftwareSigningKey` and
 `derive_with_signing_key` operations; key lifetime is a caller policy rather
 than a separate cryptographic implementation.
@@ -68,13 +69,13 @@ and certificate signatures.
 `pkcs11rs` delegates CTAP, SCP11 and YubiHSM agreement, public-point validation,
 ECDSA/Ed25519 verification, and derived P-256 authentication keys.
 
-## Completed migrations
+## Consumer adapters
 
-The previously identified key-wrap, padding, RSA encoding, generic digest/KDF,
-HMAC, Triple-DES and ML-KEM candidates have moved. Consumers now retain thin
-parameter, capability-selection and error adapters. Their direct dependencies
-on AES, Triple-DES, HMAC, HKDF, PBKDF2, SHA-1, SHA-2, SHA-3 and ML-KEM were
-removed when no independent algorithm-level use remained.
+Consumers retain thin parameter, capability-selection and error adapters for
+key wrapping, padding, RSA encoding, digest/KDF, HMAC, Triple-DES and ML-KEM.
+Direct dependencies on AES, Triple-DES, HMAC, HKDF, PBKDF2, SHA-1, SHA-2, SHA-3
+and ML-KEM belong in a consumer only when it has an independent algorithm-level
+use, such as a separately implemented test oracle.
 
 Construction names intentionally do not contain `Aes`: `GcmError`,
 `KeyWrapError` and `BlockCipherModeError` describe the reusable layer. Names
