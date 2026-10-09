@@ -28,6 +28,17 @@ P-224/P-256/P-384/P-521, secp256k1, and Brainpool P-256/P-384/P-512. Classical
 asymmetric keys also support PKCS#8 import/export at protocol boundaries such
 as YubiHSM RSA-AES key wrapping.
 
+The `x509-validation` feature validates configured certificate roots and
+explicitly provisioned P-256 CA public keys with the portable RFC 5280 validator.
+A bare key is represented as an RFC 5914 trust anchor, without fabricating a
+signed CA certificate. Presented issuer names help build paths, but signatures
+must terminate at the configured key. Critical certificate policies, including
+GlobalPlatform OCE policies, are processed; malformed policy syntax, unknown
+critical extensions, invalid signatures, expiry, and incompatible key usage are
+rejected. A bare key supplies no CA validity interval or name constraints; those
+remain the provisioning owner's policy. Public DER vectors cover direct and
+intermediate OCE paths and rejection cases.
+
 The `counter_kdf` module supplies a single-output SP 800-108 AES-CMAC counter
 KDF with caller-ordered byte arrays, one iteration counter, and an optional
 encoded output length. It supports AES-128/192/256 base keys, byte-aligned

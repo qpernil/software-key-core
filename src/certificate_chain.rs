@@ -20,9 +20,8 @@ const INVALID: CertificateError = CertificateError;
 use crate::software_signing::{EcCurve, SoftwarePublicKey};
 use const_oid::ObjectIdentifier;
 use der::{Decode, Encode, asn1::ObjectIdentifier as DerObjectIdentifier};
-use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
+use rustls_pki_types::UnixTime;
 use std::collections::HashSet;
-use webpki::{EndEntityCert, ExtendedKeyUsageValidator, KeyPurposeIdIter};
 use x509_cert::{
     Certificate,
     ext::pkix::{BasicConstraints, KeyUsage},
@@ -50,18 +49,6 @@ fn supported_signature_algorithms()
     webpki::ALL_VERIFICATION_ALGS
 }
 
-#[derive(Clone, Copy)]
-struct AttestationUsage;
-
-impl ExtendedKeyUsageValidator for AttestationUsage {
-    fn validate(&self, purposes: KeyPurposeIdIter<'_, '_>) -> Result<(), webpki::Error> {
-        for purpose in purposes {
-            purpose?;
-        }
-        Ok(())
-    }
-}
-
 #[derive(Clone)]
 pub struct ParsedCertificate {
     certificate: Certificate,
@@ -86,6 +73,15 @@ impl ParsedCertificate {
             return Err(INVALID);
         }
         validate_critical_extensions(&certificate)?;
+        // Policy evaluation may legitimately finish with a null policy tree;
+        // malformed extension syntax must still fail before path validation.
+        let policies = certificate
+            .tbs_certificate()
+            .get_extension::<x509_cert::ext::pkix::CertificatePolicies>()
+            .map_err(|_| INVALID)?;
+        if policies.is_some_and(|(_, policies)| policies.0.is_empty()) {
+            return Err(INVALID);
+        }
         let basic_constraints = certificate
             .tbs_certificate()
             .get_extension::<BasicConstraints>()
@@ -165,8 +161,6 @@ impl ParsedCertificate {
 
 #[derive(Clone)]
 pub struct CertificateTrust {
-    trust_anchors: Vec<TrustAnchor<'static>>,
-    local_intermediates: Vec<CertificateDer<'static>>,
     root_fingerprints: HashSet<Fingerprint>,
     fingerprint: Fingerprint,
     local_certificates: Vec<Vec<u8>>,
@@ -188,40 +182,7 @@ impl CertificateTrust {
         }
         .validate()
         .map_err(|_| INVALID)?;
-        let spki = spki::SubjectPublicKeyInfoOwned {
-            algorithm: spki::AlgorithmIdentifierOwned {
-                oid: EC_PUBLIC_KEY,
-                parameters: Some(der::Any::encode_from(&P256_CURVE).map_err(|_| INVALID)?),
-            },
-            subject_public_key: der::asn1::BitString::from_bytes(point).map_err(|_| INVALID)?,
-        }
-        .to_der()
-        .map_err(|_| INVALID)?;
-        let spki = der::Any::from_der(&spki)
-            .map_err(|_| INVALID)?
-            .value()
-            .to_vec();
-        let mut trust_anchors = Vec::new();
-        for encoded in certificates {
-            let certificate = ParsedCertificate::parse(encoded)?;
-            let subject = der::Any::from_der(&certificate.issuer)
-                .map_err(|_| INVALID)?
-                .value()
-                .to_vec();
-            trust_anchors.push(TrustAnchor {
-                subject: subject.into(),
-                subject_public_key_info: spki.clone().into(),
-                name_constraints: None,
-            });
-        }
-        let trust = Self {
-            trust_anchors,
-            local_intermediates: Vec::new(),
-            root_fingerprints: HashSet::new(),
-            fingerprint: sha256_fingerprint(point),
-            local_certificates: Vec::new(),
-        };
-        trust.validate_p256_key_agreement_point(certificates)
+        portable::validate_with_p256_ca_key(point, certificates)?.p256_key_agreement_point()
     }
 
     pub fn new(certificates: &[Vec<u8>]) -> Result<Self, Error> {
@@ -254,8 +215,6 @@ impl CertificateTrust {
         fingerprints.sort_unstable();
         let fingerprint = sha256_fingerprint(&fingerprints.concat());
         Ok(Self {
-            trust_anchors: Vec::new(),
-            local_intermediates: Vec::new(),
             root_fingerprints,
             fingerprint,
             local_certificates: certificates.to_vec(),
@@ -279,38 +238,7 @@ impl CertificateTrust {
     }
 
     fn validate(&self, certificates: &[Vec<u8>]) -> Result<ParsedCertificate, Error> {
-        if !self.local_certificates.is_empty() {
-            return portable::validate(self, certificates);
-        }
-        let leaf = certificates.last().ok_or(INVALID)?;
-        let leaf_der = CertificateDer::from(leaf.as_slice());
-        let end_entity = EndEntityCert::try_from(&leaf_der).map_err(|_| INVALID)?;
-        let mut fingerprints = self.root_fingerprints.clone();
-        let mut intermediates = Vec::new();
-        for certificate in &self.local_intermediates {
-            let fingerprint = sha256_fingerprint(certificate.as_ref());
-            if fingerprints.insert(fingerprint) {
-                intermediates.push(certificate.clone());
-            }
-        }
-        for certificate in &certificates[..certificates.len() - 1] {
-            let fingerprint = sha256_fingerprint(certificate);
-            if fingerprints.insert(fingerprint) {
-                intermediates.push(CertificateDer::from(certificate.clone()));
-            }
-        }
-        end_entity
-            .verify_for_usage(
-                supported_signature_algorithms(),
-                &self.trust_anchors,
-                &intermediates,
-                UnixTime::now(),
-                AttestationUsage,
-                None,
-                None,
-            )
-            .map_err(|_| INVALID)?;
-        ParsedCertificate::parse(leaf)
+        portable::validate(self, certificates)
     }
 }
 
