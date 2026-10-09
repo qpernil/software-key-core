@@ -41,6 +41,8 @@ const CRL_DISTRIBUTION_POINTS: ObjectIdentifier = ObjectIdentifier::new_unwrap("
 const AUTHORITY_INFORMATION_ACCESS: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.1.1");
 
+mod portable;
+
 type Fingerprint = [u8; 32];
 
 fn supported_signature_algorithms()
@@ -167,6 +169,7 @@ pub struct CertificateTrust {
     local_intermediates: Vec<CertificateDer<'static>>,
     root_fingerprints: HashSet<Fingerprint>,
     fingerprint: Fingerprint,
+    local_certificates: Vec<Vec<u8>>,
 }
 
 impl CertificateTrust {
@@ -216,6 +219,7 @@ impl CertificateTrust {
             local_intermediates: Vec::new(),
             root_fingerprints: HashSet::new(),
             fingerprint: sha256_fingerprint(point),
+            local_certificates: Vec::new(),
         };
         trust.validate_p256_key_agreement_point(certificates)
     }
@@ -226,10 +230,7 @@ impl CertificateTrust {
         }
         let local = parse_unique(certificates)?;
         let now = UnixTime::now().as_secs();
-        let mut trust_anchors = Vec::new();
-        let mut local_intermediates = Vec::new();
         let mut root_fingerprints = HashSet::new();
-
         for certificate in &local {
             if certificate.is_self_issued() {
                 if !certificate.is_ca
@@ -239,20 +240,10 @@ impl CertificateTrust {
                 {
                     return Err(INVALID);
                 }
-                let encoded =
-                    CertificateDer::from(certificate.certificate.to_der().map_err(|_| INVALID)?);
-                let anchor = webpki::anchor_from_trusted_cert(&encoded)
-                    .map_err(|_| INVALID)?
-                    .to_owned();
-                trust_anchors.push(anchor);
                 root_fingerprints.insert(certificate.fingerprint);
-            } else {
-                local_intermediates.push(CertificateDer::from(
-                    certificate.certificate.to_der().map_err(|_| INVALID)?,
-                ));
             }
         }
-        if trust_anchors.is_empty() {
+        if root_fingerprints.is_empty() {
             return Err(INVALID);
         }
 
@@ -263,10 +254,11 @@ impl CertificateTrust {
         fingerprints.sort_unstable();
         let fingerprint = sha256_fingerprint(&fingerprints.concat());
         Ok(Self {
-            trust_anchors,
-            local_intermediates,
+            trust_anchors: Vec::new(),
+            local_intermediates: Vec::new(),
             root_fingerprints,
             fingerprint,
+            local_certificates: certificates.to_vec(),
         })
     }
 
@@ -287,6 +279,9 @@ impl CertificateTrust {
     }
 
     fn validate(&self, certificates: &[Vec<u8>]) -> Result<ParsedCertificate, Error> {
+        if !self.local_certificates.is_empty() {
+            return portable::validate(self, certificates);
+        }
         let leaf = certificates.last().ok_or(INVALID)?;
         let leaf_der = CertificateDer::from(leaf.as_slice());
         let end_entity = EndEntityCert::try_from(&leaf_der).map_err(|_| INVALID)?;
@@ -345,6 +340,10 @@ fn validate_critical_extensions(certificate: &Certificate) -> Result<(), Error> 
         AUTHORITY_KEY_IDENTIFIER,
         CRL_DISTRIBUTION_POINTS,
         AUTHORITY_INFORMATION_ACCESS,
+        ObjectIdentifier::new_unwrap("2.5.29.30"), // nameConstraints
+        ObjectIdentifier::new_unwrap("2.5.29.33"), // policyMappings
+        ObjectIdentifier::new_unwrap("2.5.29.36"), // policyConstraints
+        ObjectIdentifier::new_unwrap("2.5.29.54"), // inhibitAnyPolicy
     ];
     if certificate
         .tbs_certificate()
@@ -400,15 +399,19 @@ pub fn verify_certificate_signature(
                 && algorithm.public_key_alg_id().as_ref() == public_key_algorithm
         })
         .ok_or(INVALID)?;
-    let issuer_der = CertificateDer::from(issuer.to_der().map_err(|_| INVALID)?);
-    let issuer = EndEntityCert::try_from(&issuer_der).map_err(|_| INVALID)?;
+    let public_key = issuer
+        .tbs_certificate()
+        .subject_public_key_info()
+        .subject_public_key
+        .as_bytes()
+        .ok_or(INVALID)?;
     let message = certificate
         .tbs_certificate()
         .to_der()
         .map_err(|_| INVALID)?;
     let signature = certificate.signature().as_bytes().ok_or(INVALID)?;
-    issuer
-        .verify_signature(algorithm, &message, signature)
+    algorithm
+        .verify_signature(public_key, &message, signature)
         .map_err(|_| INVALID)
 }
 
