@@ -95,7 +95,14 @@ retain certificate profiles, names, extensions, validity, serial-number policy,
 and protocol error mapping. The separate `x509-validation` feature provides
 strict certificate parsing, signature verification, and certificate-chain
 validation. Trust is supplied explicitly as CA certificates or a P-256 CA public
-key; presented certificates never become anchors.
+key; presented certificates never become anchors. Certificate-based trust uses
+portable `certval` RFC 5280 path validation, including critical certificate
+policies, name constraints, policy constraints, and CA path limits. Signature
+verification retains the ring-backed algorithm allowlist. Revocation fetching is
+not enabled. Bare P-256 CA-key trust retains the webpki path and has no
+certificate-based anchor validity or constraints. Consumers enabling
+`x509-validation` must include the pinned `x509-ocsp` crates.io patch from this
+manifest in their workspace root until version 0.3 is published.
 
 Private-key identity and operations are separate in the API. `KeyKind`
 selects what is generated or restored, including the RSA modulus size, while

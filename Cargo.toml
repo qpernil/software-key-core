@@ -11,9 +11,10 @@ publish = false
 [features]
 state-persistence = ["dep:libc"]
 x509-signing = ["dep:const-oid", "dep:der", "dep:spki"]
-x509-validation = ["dep:const-oid", "dep:der", "dep:spki", "dep:x509-cert", "dep:rustls-pki-types", "dep:webpki"]
+x509-validation = ["dep:const-oid", "dep:der", "dep:spki", "dep:x509-cert", "dep:rustls-pki-types", "dep:webpki", "dep:certval"]
 
 [dependencies]
+certval = { git = "https://github.com/carl-wallace/rust-pki", rev = "7b45426af9a1b99b5f5aa5c348deea8c338412b5", default-features = false, features = ["std"], optional = true }
 const-oid = { version = "0.10.2", optional = true }
 der = { version = "0.8.1", features = ["alloc", "derive", "std"], optional = true }
 spki = { version = "0.8.0", features = ["alloc", "std"], optional = true }
@@ -62,3 +63,7 @@ libc = { version = "0.2.189", optional = true }
 [dev-dependencies]
 serde_json = "1.0.149"
 flate2 = "1.1.9"
+
+[patch.crates-io]
+# certval requires x509-ocsp 0.3, which is not yet published on crates.io.
+x509-ocsp = { git = "https://github.com/RustCrypto/formats.git", rev = "2c0b0f99cf2bbc0738edc4e439e97dcc204099f5" }
