@@ -10,6 +10,45 @@ pub(super) fn validate(
     trust: &CertificateTrust,
     certificates: &[Vec<u8>],
 ) -> Result<ParsedCertificate, Error> {
+    validate_inner(trust, certificates, None)
+}
+
+pub(super) fn validate_attestation(
+    trust: &CertificateTrust,
+    certificates: &[Vec<u8>],
+    optional_key_usage_issuer: &[u8],
+) -> Result<ParsedCertificate, Error> {
+    let issuer = ParsedCertificate::parse(optional_key_usage_issuer)?;
+    if !issuer.is_ca || issuer.is_self_issued() {
+        return Err(INVALID);
+    }
+    validate_inner(trust, certificates, Some(issuer.fingerprint))
+}
+
+fn validate_inner(
+    trust: &CertificateTrust,
+    certificates: &[Vec<u8>],
+    optional_key_usage_issuer: Option<Fingerprint>,
+) -> Result<ParsedCertificate, Error> {
+    if let Some(allowed) = optional_key_usage_issuer {
+        // The exception names one exact issuer certificate, not all missing
+        // KeyUsage extensions in paths built from the supplied certificate pool.
+        for certificate in
+            parse_unique(&[trust.local_certificates.clone(), certificates.to_vec()].concat())?
+        {
+            if certificate.is_ca
+                && certificate
+                    .certificate
+                    .tbs_certificate()
+                    .get_extension::<KeyUsage>()
+                    .map_err(|_| INVALID)?
+                    .is_none()
+                && certificate.fingerprint != allowed
+            {
+                return Err(INVALID);
+            }
+        }
+    }
     let mut anchor_files = Vec::new();
     let mut source_files = Vec::new();
     for (i, encoded) in trust.local_certificates.iter().enumerate() {
@@ -24,7 +63,12 @@ pub(super) fn validate(
             source_files.push(file);
         }
     }
-    validate_files(anchor_files, source_files, certificates)
+    validate_files(
+        anchor_files,
+        source_files,
+        certificates,
+        optional_key_usage_issuer.is_some(),
+    )
 }
 
 /// RFC 5914 represents the caller's fixed CA key without inventing a signed
@@ -89,13 +133,14 @@ pub(super) fn validate_with_p256_ca_key(
             bytes: anchor.to_der().map_err(|_| INVALID)?,
         });
     }
-    validate_files(anchors, Vec::new(), certificates)
+    validate_files(anchors, Vec::new(), certificates, false)
 }
 
 fn validate_files(
     anchor_files: Vec<CertFile>,
     source_files: Vec<CertFile>,
     certificates: &[Vec<u8>],
+    optional_ca_key_usage: bool,
 ) -> Result<ParsedCertificate, Error> {
     if certificates.is_empty() || certificates.len() > 8 {
         return Err(INVALID);
@@ -119,6 +164,10 @@ fn validate_files(
     settings.set_enforce_trust_anchor_constraints(true);
     let mut environment = PkiEnvironment::default();
     environment.populate_5280_pki_environment();
+    if optional_ca_key_usage {
+        environment.clear_validate_path_callbacks();
+        environment.add_validate_path_callback(validate_optional_ca_key_usage);
+    }
     // Keep the existing ring-backed algorithm allowlist for certificate signatures.
     environment.clear_verify_signature_digest_callbacks();
     environment.clear_verify_signature_message_callbacks();
@@ -164,6 +213,54 @@ fn validate_files(
         }
     }
     Err(INVALID)
+}
+
+// RFC 5280 6.1.4(n) requires keyCertSign when KeyUsage is present.
+// certval deliberately requires it on every CA. This compatibility callback
+// runs only after preflight has allowed absence on one exact, named issuer.
+fn validate_optional_ca_key_usage(
+    environment: &PkiEnvironment,
+    settings: &CertificationPathSettings,
+    path: &certval::CertificationPath,
+    results: &mut CertificationPathResults,
+) -> certval::Result<()> {
+    use certval::PathValidationStatus;
+    let result = certval::validate_path_rfc5280(environment, settings, path, results);
+    if !matches!(
+        result,
+        Err(certval::Error::PathValidation(
+            PathValidationStatus::InvalidKeyUsage
+        ))
+    ) {
+        return result;
+    }
+    let intermediates = path
+        .intermediates
+        .iter()
+        .filter_map(|certificate| {
+            match certificate.get_extension(&KEY_USAGE) {
+                Ok(None) => None,
+                // Retain present restrictions and malformed-extension errors.
+                _ => Some(certificate.clone()),
+            }
+        })
+        .collect::<Vec<_>>();
+    if intermediates.len() == path.intermediates.len() {
+        return result;
+    }
+    let usage_path = certval::CertificationPath::new(
+        path.trust_anchor.clone(),
+        intermediates,
+        path.target.clone(),
+    );
+    // Only KeyUsage sees this filtered list. Every other check uses the full
+    // original path: all checks preceding KeyUsage passed in the call above.
+    certval::check_key_usage(environment, settings, &usage_path, results)?;
+    certval::check_extended_key_usage(environment, settings, path, results)?;
+    certval::check_critical_extensions(environment, settings, path, results)?;
+    certval::verify_signatures(environment, settings, path, results)?;
+    results.set_validation_status(PathValidationStatus::Valid);
+    Ok(())
 }
 
 fn verify_signature(
@@ -255,5 +352,61 @@ mod tests {
         let mut tampered = LEAF.to_vec();
         *tampered.last_mut().unwrap() ^= 1;
         assert!(CertificateTrust::validate_with_p256_ca_key(&point, &[tampered]).is_err());
+    }
+
+    #[test]
+    fn factory_attestation_exception_names_one_exact_non_root_issuer() {
+        let root = include_bytes!("fixtures/yubihsm-root.der").to_vec();
+        let intermediate = include_bytes!("fixtures/yubihsm-intermediate.der").to_vec();
+        let device = include_bytes!("fixtures/yubihsm-device.der").to_vec();
+        let leaf = include_bytes!("fixtures/yubihsm-attestation.der").to_vec();
+        let chain = vec![intermediate.clone(), device.clone(), leaf.clone()];
+        let trust = CertificateTrust::new(std::slice::from_ref(&root)).unwrap();
+        assert!(trust.validate_p256_public_point(&chain).is_err());
+        assert_eq!(
+            trust
+                .validate_p256_attestation_chain(&chain, &device)
+                .unwrap(),
+            ParsedCertificate::parse(&leaf)
+                .unwrap()
+                .p256_public_point()
+                .unwrap()
+        );
+        for wrong in [&root, &intermediate, &leaf] {
+            assert!(
+                trust
+                    .validate_p256_attestation_chain(&chain, wrong)
+                    .is_err()
+            );
+        }
+        let unrelated = CertificateTrust::new(&[ROOT.to_vec()]).unwrap();
+        assert!(
+            unrelated
+                .validate_p256_attestation_chain(&chain, &device)
+                .is_err()
+        );
+        for index in 0..chain.len() {
+            let mut tampered = chain.clone();
+            *tampered[index].last_mut().unwrap() ^= 1;
+            assert!(
+                trust
+                    .validate_p256_attestation_chain(&tampered, &device)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn optional_ca_usage_never_ignores_a_present_key_cert_sign_restriction() {
+        let root = include_bytes!("fixtures/usage-restriction-0.der").to_vec();
+        let optional = include_bytes!("fixtures/usage-restriction-1.der").to_vec();
+        let restricted = include_bytes!("fixtures/usage-restriction-2.der").to_vec();
+        let leaf = include_bytes!("fixtures/usage-restriction-3.der").to_vec();
+        let trust = CertificateTrust::new(&[root]).unwrap();
+        assert!(
+            trust
+                .validate_p256_attestation_chain(&[optional.clone(), restricted, leaf], &optional)
+                .is_err()
+        );
     }
 }

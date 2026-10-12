@@ -115,6 +115,14 @@ certificate-based anchor validity or constraints. Consumers enabling
 `x509-validation` must include the pinned `x509-ocsp` crates.io patch from this
 manifest in their workspace root until version 0.3 is published.
 
+Attestation consumers can explicitly name one exact non-root CA certificate
+whose KeyUsage extension may be absent with
+`CertificateTrust::validate_p256_attestation_chain`. Ordinary validation stays
+strict. This opt-in does not add trust anchors or disregard present KeyUsage
+restrictions. Signature verification, validity, policies, name constraints,
+critical extensions, and path limits still apply to the complete original chain.
+The caller must pin the trusted root and independently verify the attested key.
+
 Private-key identity and operations are separate in the API. `KeyKind`
 selects what is generated or restored, including the RSA modulus size, while
 `SignatureScheme` selects the digest and padding used by one operation. Runtime
