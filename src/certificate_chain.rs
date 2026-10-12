@@ -225,6 +225,19 @@ impl CertificateTrust {
         self.validate(certificates)?.p256_public_point()
     }
 
+    /// Validate a P-256 attestation chain allowing one explicitly named,
+    /// non-root CA issuer to omit KeyUsage. Present restrictions and every
+    /// original path signature, validity, policy, name, and constraint check
+    /// remain enforced. Ordinary validation still requires explicit CA KeyUsage.
+    pub fn validate_p256_attestation_chain(
+        &self,
+        certificates: &[Vec<u8>],
+        optional_key_usage_issuer: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        portable::validate_attestation(self, certificates, optional_key_usage_issuer)?
+            .p256_public_point()
+    }
+
     pub fn fingerprint(&self) -> Fingerprint {
         self.fingerprint
     }
