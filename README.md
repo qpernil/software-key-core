@@ -168,6 +168,16 @@ software-key-core
 
 Rust 1.95 or newer is required. CI checks that minimum as well as stable Rust.
 
+Dependency updates prefer stable releases and must not add prerelease dependencies.
+Brainpool P-256/P-384 use stable releases. P-224, Ed448 and X448 retain the
+prereleases needed for the shared RustCrypto 0.14-era interfaces; their older
+stable releases use incompatible crypto dependency generations. Optional
+certificate validation retains pinned `certval` and `x509-ocsp` Git revisions
+and the compatible CMS 0.3 prerelease because the corresponding stable APIs
+are not published. Review these exceptions when compatible stable releases
+become available. Update shared dependency versions in the consumer lockfiles
+and validate with `--locked`, including known-answer tests and Rust 1.95 checks.
+
 Run the standalone test suite with:
 
 ```console
