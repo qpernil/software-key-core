@@ -28,6 +28,11 @@ P-224/P-256/P-384/P-521, secp256k1, and Brainpool P-256/P-384/P-512. Classical
 asymmetric keys also support PKCS#8 import/export at protocol boundaries such
 as YubiHSM RSA-AES key wrapping.
 
+RSA generation and untrusted private/public import use the shared
+[`rsa_keys` boundary](docs/rsa-key-validation.md). It validates key quality,
+recalculates CRT parameters and performs private-key pairwise tests. Protocol
+size/exponent acceptance is separate; trusted state restoration is explicit.
+
 The `x509-validation` feature validates configured certificate roots and
 explicitly provisioned P-256 CA public keys with the portable RFC 5280 validator.
 A bare key is represented as an RFC 5914 trust anchor, without fabricating a
