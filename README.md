@@ -33,6 +33,11 @@ RSA generation and untrusted private/public import use the shared
 recalculates CRT parameters and performs private-key pairwise tests. Protocol
 size/exponent acceptance is separate; trusted state restoration is explicit.
 
+Ed25519 and Ed448 public points and signatures use the shared
+[Edwards validation policy](docs/edwards-key-validation.md). Private seeds retain
+their full 32-byte or 57-byte input domain; weak-key and encoding checks apply
+to public points and signature verification.
+
 The `x509-validation` feature validates configured certificate roots and
 explicitly provisioned P-256 CA public keys with the portable RFC 5280 validator.
 A bare key is represented as an RFC 5914 trust anchor, without fabricating a

@@ -249,6 +249,36 @@ macro_rules! verify_generic_ecdsa_prehash {
     }};
 }
 
+// RFC 8032 §5.1.3 encoding checks plus Dalek's weak-key rejection.
+// Private Ed25519 seeds remain arbitrary 32-byte strings; these checks apply
+// to public points, including keys reconstructed from certificates/state.
+fn checked_ed25519_verifying_key(
+    encoded: &[u8],
+) -> Result<ed25519_dalek::VerifyingKey, SoftwareSigningError> {
+    let invalid = || SoftwareSigningError::InvalidPublicKey;
+    let bytes = encoded.try_into().map_err(|_| invalid())?;
+    let key = ed25519_dalek::VerifyingKey::from_bytes(bytes).map_err(|_| invalid())?;
+    if key.is_weak() || key.to_edwards().compress().as_bytes() != bytes {
+        return Err(invalid());
+    }
+    Ok(key)
+}
+
+// The Ed448 constructor uses checked decompression (on-curve and prime-order
+// subgroup) and rejects identity keys. Re-encoding also rejects unused bits and
+// noncanonical field encodings, RFC 8032 §5.2.3, without duplicating curve math.
+fn checked_ed448_verifying_key(
+    encoded: &[u8],
+) -> Result<ed448_goldilocks::VerifyingKey, SoftwareSigningError> {
+    let invalid = || SoftwareSigningError::InvalidPublicKey;
+    let bytes = encoded.try_into().map_err(|_| invalid())?;
+    let key = ed448_goldilocks::VerifyingKey::from_bytes(bytes).map_err(|_| invalid())?;
+    if key.to_edwards().to_affine().compress().as_bytes() != bytes {
+        return Err(invalid());
+    }
+    Ok(key)
+}
+
 // RFC 8032 requires a canonical point encoding. The dependency's decoder
 // ignores unused bits, so check re-encoding before accepting A or R.
 fn canonical_ed448_point(encoded: &[u8]) -> bool {
@@ -261,7 +291,8 @@ fn canonical_ed448_point(encoded: &[u8]) -> bool {
     else {
         return false;
     };
-    point.compress().as_bytes() == &bytes
+    point.to_edwards() != ed448_goldilocks::EdwardsPoint::IDENTITY
+        && point.compress().as_bytes() == &bytes
 }
 
 impl SoftwarePublicKey {
@@ -294,30 +325,11 @@ impl SoftwarePublicKey {
             Self::Edwards {
                 curve: EdwardsCurve::Ed25519,
                 public_key,
-            } => {
-                let public = public_key
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
-                ed25519_dalek::VerifyingKey::from_bytes(public)
-                    .map(|_| ())
-                    .map_err(|_| SoftwareSigningError::InvalidPublicKey)
-            }
+            } => checked_ed25519_verifying_key(public_key).map(|_| ()),
             Self::Edwards {
                 curve: EdwardsCurve::Ed448,
                 public_key,
-            } => {
-                let public = public_key
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
-                if !canonical_ed448_point(public_key) {
-                    return Err(SoftwareSigningError::InvalidPublicKey);
-                }
-                ed448_goldilocks::VerifyingKey::from_bytes(public)
-                    .map(|_| ())
-                    .map_err(|_| SoftwareSigningError::InvalidPublicKey)
-            }
+            } => checked_ed448_verifying_key(public_key).map(|_| ()),
             Self::MlDsa {
                 parameter_set,
                 public_key,
@@ -450,15 +462,10 @@ impl SoftwarePublicKey {
                     public_key,
                 },
             ) => {
-                let public = public_key
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
-                let key = ed25519_dalek::VerifyingKey::from_bytes(public)
-                    .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
+                let key = checked_ed25519_verifying_key(public_key)?;
                 let signature = ed25519_dalek::Signature::try_from(signature)
                     .map_err(|_| SoftwareSigningError::InvalidSignature)?;
-                key.verify(message, &signature)
+                key.verify_strict(message, &signature)
                     .map_err(|_| SoftwareSigningError::InvalidSignature)
             }
             (
@@ -468,18 +475,10 @@ impl SoftwarePublicKey {
                     public_key,
                 },
             ) => {
-                let public = public_key
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
-                if !canonical_ed448_point(public_key) {
-                    return Err(SoftwareSigningError::InvalidPublicKey);
-                }
+                let key = checked_ed448_verifying_key(public_key)?;
                 if signature.len() != 114 || !canonical_ed448_point(&signature[..57]) {
                     return Err(SoftwareSigningError::InvalidSignature);
                 }
-                let key = ed448_goldilocks::VerifyingKey::from_bytes(public)
-                    .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
                 let signature = ed448_goldilocks::Signature::try_from(signature)
                     .map_err(|_| SoftwareSigningError::InvalidSignature)?;
                 key.verify_raw(&signature, message)
@@ -1890,6 +1889,181 @@ mod tests {
                 digit(pair[0]) << 4 | digit(pair[1])
             })
             .collect()
+    }
+
+    #[test]
+    fn edwards_private_seeds_keep_their_full_input_domain() {
+        for (curve, length) in [(EdwardsCurve::Ed25519, 32), (EdwardsCurve::Ed448, 57)] {
+            for byte in [0u8, 0xff] {
+                let key = SoftwareEdwardsKey::from_serialized(curve, &vec![byte; length]).unwrap();
+                let public = SoftwarePublicKey::Edwards {
+                    curve,
+                    public_key: key.public_key(),
+                };
+                public.validate().unwrap();
+                let message = b"private seeds are not public point encodings";
+                public
+                    .verify_message(
+                        curve.signature_scheme(),
+                        message,
+                        &key.sign_message(message),
+                    )
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn ed25519_rejects_weak_public_keys_and_identity_forgery() {
+        let mut identity = vec![0; 32];
+        identity[0] = 1;
+        let mut minus_one = vec![0xff; 32];
+        minus_one[0] = 0xec;
+        minus_one[31] = 0x7f;
+        let mut forged = vec![0; 64];
+        forged[0] = 1; // R = identity, S = 0.
+        for encoded in [identity, vec![0; 32], minus_one] {
+            let parsed =
+                ed25519_dalek::VerifyingKey::from_bytes(encoded.as_slice().try_into().unwrap())
+                    .unwrap();
+            assert!(parsed.is_weak());
+            let public = SoftwarePublicKey::Edwards {
+                curve: EdwardsCurve::Ed25519,
+                public_key: encoded,
+            };
+            assert_eq!(
+                public.validate(),
+                Err(SoftwareSigningError::InvalidPublicKey)
+            );
+            assert!(
+                public
+                    .verify_message(SignatureScheme::Ed25519, b"forged", &forged)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn ed25519_strict_verification_rejects_low_order_signature_r() {
+        // A = B (scalar 1), R = identity (nonce 0), S = H(R || A || M) mod L.
+        // This satisfies the ordinary verification equation, but Dalek's strict
+        // verifier rejects the low-order R. No private seed is imported here.
+        let mut public = [0x66; 32];
+        public[0] = 0x58;
+        let message = b"strict verification regression";
+        let mut signature = [0; 64];
+        signature[0] = 1;
+        let mut hash = Sha512::new();
+        hash.update(&signature[..32]);
+        hash.update(public);
+        hash.update(message);
+        let order = (rsa::BigUint::from(1u8) << 252)
+            + rsa::BigUint::parse_bytes(b"27742317777372353535851937790883648493", 10).unwrap();
+        let scalar = (rsa::BigUint::from_bytes_le(&hash.finalize()) % order).to_bytes_le();
+        signature[32..32 + scalar.len()].copy_from_slice(&scalar);
+        let parsed = ed25519_dalek::VerifyingKey::from_bytes(&public).unwrap();
+        let sig = ed25519_dalek::Signature::from_bytes(&signature);
+        parsed.verify(message, &sig).unwrap();
+        let public = SoftwarePublicKey::Edwards {
+            curve: EdwardsCurve::Ed25519,
+            public_key: public.to_vec(),
+        };
+        public.validate().unwrap();
+        assert_eq!(
+            public.verify_message(SignatureScheme::Ed25519, message, &signature),
+            Err(SoftwareSigningError::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn ed448_rejects_identity_torsion_and_mixed_order_public_keys() {
+        let mut identity = vec![0; 57];
+        identity[0] = 1;
+        let order_two = ((rsa::BigUint::from(1u8) << 448)
+            - (rsa::BigUint::from(1u8) << 224)
+            - rsa::BigUint::from(2u8))
+        .to_bytes_le();
+        let mut order_two_bytes = [0; 57];
+        order_two_bytes[..order_two.len()].copy_from_slice(&order_two);
+        let torsion = ed448_goldilocks::CompressedEdwardsY(order_two_bytes)
+            .decompress_unchecked()
+            .unwrap()
+            .to_edwards();
+        let mixed = (ed448_goldilocks::EdwardsPoint::GENERATOR + torsion)
+            .to_affine()
+            .compress()
+            .to_bytes();
+        for encoded in [
+            identity,
+            vec![0; 57],
+            order_two_bytes.to_vec(),
+            mixed.to_vec(),
+        ] {
+            let public = SoftwarePublicKey::Edwards {
+                curve: EdwardsCurve::Ed448,
+                public_key: encoded,
+            };
+            assert_eq!(
+                public.validate(),
+                Err(SoftwareSigningError::InvalidPublicKey)
+            );
+            assert!(
+                public
+                    .verify_message(SignatureScheme::Ed448, b"forged", &[0; 114])
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn edwards_rejects_noncanonical_public_and_signature_points() {
+        for curve in [EdwardsCurve::Ed25519, EdwardsCurve::Ed448] {
+            let key = SoftwareEdwardsKey::generate(curve).unwrap();
+            let message = b"canonical encodings";
+            let public_bytes = key.public_key();
+            let valid = SoftwarePublicKey::Edwards {
+                curve,
+                public_key: public_bytes.clone(),
+            };
+            valid.validate().unwrap();
+            let signature = key.sign_message(message);
+            valid
+                .verify_message(curve.signature_scheme(), message, &signature)
+                .unwrap();
+            let mut malformed = signature.clone();
+            if curve == EdwardsCurve::Ed448 {
+                let mut public = public_bytes;
+                public[56] |= 1;
+                assert_eq!(
+                    SoftwarePublicKey::Edwards {
+                        curve,
+                        public_key: public
+                    }
+                    .validate(),
+                    Err(SoftwareSigningError::InvalidPublicKey)
+                );
+                malformed[56] |= 1;
+            } else {
+                // y = p + 1 aliases the identity under permissive decoding.
+                let mut public = vec![0xff; 32];
+                public[0] = 0xee;
+                public[31] = 0x7f;
+                assert_eq!(
+                    SoftwarePublicKey::Edwards {
+                        curve,
+                        public_key: public
+                    }
+                    .validate(),
+                    Err(SoftwareSigningError::InvalidPublicKey)
+                );
+                malformed[..32].fill(0xff);
+            }
+            assert!(
+                valid
+                    .verify_message(curve.signature_scheme(), message, &malformed)
+                    .is_err()
+            );
+        }
     }
 
     #[test]
