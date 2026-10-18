@@ -34,14 +34,14 @@ use p384::SecretKey as P384SecretKey;
 use p384::ecdsa::SigningKey as P384SigningKey;
 use p521::SecretKey as P521SecretKey;
 use p521::ecdsa::SigningKey as P521SigningKey;
-use rsa::pkcs8::{
-    DecodePrivateKey as DecodeRsaPrivateKey, EncodePrivateKey as EncodeRsaPrivateKey,
-};
+use rsa::pkcs8::EncodePrivateKey as EncodeRsaPrivateKey;
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use signature::hazmat::{PrehashSigner, PrehashVerifier};
 use signature::{Signer, Verifier};
-use std::{fmt, sync::Arc};
+use std::fmt;
+#[cfg(test)]
+use std::sync::Arc;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// A signing operation, independent of how the private key was created or stored.
@@ -1177,7 +1177,7 @@ impl SoftwareEdwardsKey {
 pub enum SoftwareSigningKey {
     Ec(SoftwareEcKey),
     Edwards(Box<SoftwareEdwardsKey>),
-    Rsa(Arc<RsaPrivateKey>),
+    Rsa(crate::rsa_keys::RsaKey),
     MlDsa(MlDsaPrivateKey),
 }
 
@@ -1205,6 +1205,19 @@ impl fmt::Debug for SoftwareSigningKey {
             .debug_struct("SoftwareSigningKey")
             .field("kind", &self.kind_name())
             .finish_non_exhaustive()
+    }
+}
+
+fn rsa_key_error(
+    error: crate::rsa_private_validation::RsaPrivateValidationError,
+) -> SoftwareSigningError {
+    match error {
+        crate::rsa_private_validation::RsaPrivateValidationError::InvalidPrivateKey => {
+            SoftwareSigningError::InvalidPrivateKey
+        }
+        crate::rsa_private_validation::RsaPrivateValidationError::RandomnessUnavailable => {
+            SoftwareSigningError::RandomnessUnavailable
+        }
     }
 }
 
@@ -1296,13 +1309,9 @@ impl SoftwareSigningKey {
             | SignatureScheme::RsaPssSha512
             | SignatureScheme::RsaPkcs1Sha256
             | SignatureScheme::RsaPkcs1Sha384
-            | SignatureScheme::RsaPkcs1Sha512 => {
-                let mut key = RsaPrivateKey::from_pkcs8_der(serialized)
-                    .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
-                key.precompute()
-                    .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
-                Ok(Self::Rsa(Arc::new(key)))
-            }
+            | SignatureScheme::RsaPkcs1Sha512 => crate::rsa_keys::RsaKey::import_pkcs8(serialized)
+                .map(Self::Rsa)
+                .map_err(rsa_key_error),
             SignatureScheme::MlDsa(parameter_set) => {
                 MlDsaPrivateKey::from_pkcs8_der(parameter_set, serialized)
                     .map(Self::MlDsa)
@@ -1376,13 +1385,7 @@ impl SoftwareSigningKey {
             | SignatureScheme::RsaPssSha512
             | SignatureScheme::RsaPkcs1Sha256
             | SignatureScheme::RsaPkcs1Sha384
-            | SignatureScheme::RsaPkcs1Sha512 => {
-                let mut key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2_048)
-                    .map_err(|_| SoftwareSigningError::RandomnessUnavailable)?;
-                key.precompute()
-                    .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
-                Ok(Self::Rsa(Arc::new(key)))
-            }
+            | SignatureScheme::RsaPkcs1Sha512 => Self::generate_rsa(2048),
             SignatureScheme::MlDsa(parameter_set) => MlDsaPrivateKey::generate(parameter_set)
                 .map(Self::MlDsa)
                 .map_err(|_| SoftwareSigningError::RandomnessUnavailable),
@@ -1401,28 +1404,58 @@ impl SoftwareSigningKey {
 
     /// Generate an RSA key with an explicit modulus size.
     pub fn generate_rsa(modulus_bits: usize) -> Result<Self, SoftwareSigningError> {
-        let mut key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, modulus_bits)
-            .map_err(|_| SoftwareSigningError::RandomnessUnavailable)?;
-        key.precompute()
-            .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
-        Ok(Self::Rsa(Arc::new(key)))
+        crate::rsa_keys::RsaKey::generate(modulus_bits)
+            .map(Self::Rsa)
+            .map_err(rsa_key_error)
     }
 
-    /// Reconstruct an RSA private key from its two primes and public exponent.
+    /// Import untrusted p/q material through the shared validation boundary.
     pub fn from_rsa_primes(
         p: &[u8],
         q: &[u8],
-        public_exponent: &[u8],
+        exponent: &[u8],
     ) -> Result<Self, SoftwareSigningError> {
-        let mut key = RsaPrivateKey::from_p_q(
+        crate::rsa_keys::RsaKey::import_primes(
             rsa::BigUint::from_bytes_be(p),
             rsa::BigUint::from_bytes_be(q),
-            rsa::BigUint::from_bytes_be(public_exponent),
+            rsa::BigUint::from_bytes_be(exponent),
         )
-        .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
-        key.precompute()
-            .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
-        Ok(Self::Rsa(Arc::new(key)))
+        .map(Self::Rsa)
+        .map_err(rsa_key_error)
+    }
+
+    /// Reconstruct trusted persisted p/q material; never use for a new import.
+    pub fn restore_rsa_primes(
+        p: &[u8],
+        q: &[u8],
+        exponent: &[u8],
+    ) -> Result<Self, SoftwareSigningError> {
+        crate::rsa_keys::RsaKey::restore_primes(
+            rsa::BigUint::from_bytes_be(p),
+            rsa::BigUint::from_bytes_be(q),
+            rsa::BigUint::from_bytes_be(exponent),
+        )
+        .map(Self::Rsa)
+        .map_err(rsa_key_error)
+    }
+
+    /// Import PKCS #11 RSA components. Optional factor recovery is owned here.
+    pub fn from_rsa_components(
+        n: rsa::BigUint,
+        e: rsa::BigUint,
+        d: rsa::BigUint,
+        primes: Vec<rsa::BigUint>,
+    ) -> Result<Self, SoftwareSigningError> {
+        crate::rsa_keys::RsaKey::import_components(n, e, d, primes)
+            .map(Self::Rsa)
+            .map_err(rsa_key_error)
+    }
+
+    /// Restore trusted software-slot PKCS#1 state through the shared boundary.
+    pub fn restore_rsa_pkcs1(encoded: &[u8]) -> Result<Self, SoftwareSigningError> {
+        crate::rsa_keys::RsaKey::restore_pkcs1(encoded)
+            .map(Self::Rsa)
+            .map_err(rsa_key_error)
     }
 
     pub fn from_serialized(
@@ -1458,13 +1491,9 @@ impl SoftwareSigningKey {
             | SignatureScheme::RsaPssSha512
             | SignatureScheme::RsaPkcs1Sha256
             | SignatureScheme::RsaPkcs1Sha384
-            | SignatureScheme::RsaPkcs1Sha512 => {
-                let mut key = RsaPrivateKey::from_pkcs8_der(serialized)
-                    .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
-                key.precompute()
-                    .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?;
-                Ok(Self::Rsa(Arc::new(key)))
-            }
+            | SignatureScheme::RsaPkcs1Sha512 => crate::rsa_keys::RsaKey::restore_pkcs8(serialized)
+                .map(Self::Rsa)
+                .map_err(rsa_key_error),
             SignatureScheme::MlDsa(parameter_set) => {
                 MlDsaPrivateKey::from_seed_slice(parameter_set, serialized)
                     .map(Self::MlDsa)
