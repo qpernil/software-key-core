@@ -4,8 +4,12 @@
 //! in their callers. This module deliberately operates on raw FIPS 204 keys,
 //! messages, contexts, and signatures so it can also be reused by `pkcs11rs`.
 
-use ::ml_dsa::{EncodedVerifyingKey, MlDsa44, MlDsa65, MlDsa87, Seed, Signature, SigningKey};
+use ::ml_dsa::{
+    EncodedVerifyingKey, ExpandedSigningKey, ExpandedSigningKeyBytes, MlDsa44, MlDsa65, MlDsa87,
+    MlDsaParams, Seed, Signature, SigningKey, VerifyingKey,
+};
 use std::{fmt, sync::Arc};
+use subtle::ConstantTimeEq;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -104,10 +108,22 @@ impl MlKemPrivateKey {
         ))
     }
 
-    #[allow(deprecated)]
+    /// Import an expanded key after encoding/hash checks and a randomized
+    /// encapsulation/decapsulation pairwise consistency check (FIPS 203 §7.1).
     pub fn from_expanded_private_key(
         parameter_set: MlKemParameterSet,
         expanded: &[u8],
+    ) -> Result<Self, MlKemError> {
+        Self::from_expanded_private_key_with_randomness(parameter_set, expanded, |randomness| {
+            getrandom::fill(randomness).map_err(|_| MlKemError::RandomnessUnavailable)
+        })
+    }
+
+    #[allow(deprecated)]
+    fn from_expanded_private_key_with_randomness(
+        parameter_set: MlKemParameterSet,
+        expanded: &[u8],
+        fill_randomness: impl FnOnce(&mut [u8; 32]) -> Result<(), MlKemError>,
     ) -> Result<Self, MlKemError> {
         macro_rules! decode {
             ($params:ty, $variant:ident) => {{
@@ -118,44 +134,85 @@ impl MlKemPrivateKey {
                     .map_err(|_| MlKemError::InvalidExpandedPrivateKey)
             }};
         }
-        match parameter_set {
+        let key = match parameter_set {
             MlKemParameterSet::MlKem512 => decode!(::ml_kem::MlKem512, MlKem512),
             MlKemParameterSet::MlKem768 => decode!(::ml_kem::MlKem768, MlKem768),
             MlKemParameterSet::MlKem1024 => decode!(::ml_kem::MlKem1024, MlKem1024),
+        }?;
+        // FIPS 203 §7.1 key-pair check, step 4. Decapsulation uses implicit
+        // rejection, so successful decoding/decapsulation alone cannot establish
+        // consistency. Compare the shared secrets, in constant time.
+        let mut randomness = Zeroizing::new([0u8; 32]);
+        fill_randomness(&mut randomness)?;
+        let (ciphertext, expected) =
+            ml_kem_encapsulate_deterministic(parameter_set, &key.public_key(), &randomness)?;
+        let actual = key.decapsulate(&ciphertext)?;
+        if !bool::from(expected.as_slice().ct_eq(actual.as_slice())) {
+            return Err(MlKemError::InvalidExpandedPrivateKey);
         }
+        Ok(key)
+    }
+
+    fn algorithm_for(
+        parameter_set: MlKemParameterSet,
+    ) -> ::ml_dsa::pkcs8::AlgorithmIdentifierRef<'static> {
+        use ::ml_kem::pkcs8::AssociatedAlgorithmIdentifier;
+        match parameter_set {
+            MlKemParameterSet::MlKem512 => ::ml_kem::MlKem512::ALGORITHM_IDENTIFIER,
+            MlKemParameterSet::MlKem768 => ::ml_kem::MlKem768::ALGORITHM_IDENTIFIER,
+            MlKemParameterSet::MlKem1024 => ::ml_kem::MlKem1024::ALGORITHM_IDENTIFIER,
+        }
+    }
+
+    pub fn from_seed_and_expanded(
+        parameter_set: MlKemParameterSet,
+        seed: &[u8],
+        expanded: &[u8],
+    ) -> Result<Self, MlKemError> {
+        let key = Self::from_seed_slice(parameter_set, seed)?;
+        if !bool::from(key.expanded_private_key().as_slice().ct_eq(expanded)) {
+            return Err(MlKemError::InvalidExpandedPrivateKey);
+        }
+        Ok(key)
     }
 
     pub fn from_pkcs8_der(
         parameter_set: MlKemParameterSet,
         encoded: &[u8],
     ) -> Result<Self, MlKemError> {
-        use ::ml_kem::pkcs8::DecodePrivateKey;
-        match parameter_set {
-            MlKemParameterSet::MlKem512 => {
-                ::ml_kem::DecapsulationKey::<::ml_kem::MlKem512>::from_pkcs8_der(encoded)
-                    .map(|key| Self::MlKem512(Arc::new(key)))
+        use crate::pqc_key_encoding::{self, PrivateEncoding};
+        let decoded = pqc_key_encoding::decode(encoded, Self::algorithm_for(parameter_set))
+            .map_err(|_| MlKemError::InvalidPrivateKey)?;
+        let key = match decoded.encoding {
+            PrivateEncoding::Seed(seed) => Self::from_seed_slice(parameter_set, seed)?,
+            PrivateEncoding::Expanded(expanded) => {
+                Self::from_expanded_private_key(parameter_set, expanded)?
             }
-            MlKemParameterSet::MlKem768 => {
-                ::ml_kem::DecapsulationKey::<::ml_kem::MlKem768>::from_pkcs8_der(encoded)
-                    .map(|key| Self::MlKem768(Arc::new(key)))
+            PrivateEncoding::Both { seed, expanded } => {
+                Self::from_seed_and_expanded(parameter_set, seed, expanded)?
             }
-            MlKemParameterSet::MlKem1024 => {
-                ::ml_kem::DecapsulationKey::<::ml_kem::MlKem1024>::from_pkcs8_der(encoded)
-                    .map(|key| Self::MlKem1024(Arc::new(key)))
-            }
+        };
+        if decoded
+            .public
+            .is_some_and(|public| key.public_key() != public)
+        {
+            return Err(MlKemError::InvalidPrivateKey);
         }
-        .map_err(|_| MlKemError::InvalidPrivateKey)
+        Ok(key)
     }
 
     pub fn to_pkcs8_der(&self) -> Result<Zeroizing<Vec<u8>>, MlKemError> {
-        use ::ml_kem::pkcs8::EncodePrivateKey;
-        let document = match self {
-            Self::MlKem512(key) => key.to_pkcs8_der(),
-            Self::MlKem768(key) => key.to_pkcs8_der(),
-            Self::MlKem1024(key) => key.to_pkcs8_der(),
+        use crate::pqc_key_encoding::{self, PrivateEncoding};
+        let algorithm = Self::algorithm_for(self.parameter_set());
+        match self.seed() {
+            Some(seed) => pqc_key_encoding::encode(algorithm, PrivateEncoding::Seed(&seed), None),
+            None => pqc_key_encoding::encode(
+                algorithm,
+                PrivateEncoding::Expanded(&self.expanded_private_key()),
+                None,
+            ),
         }
-        .map_err(|_| MlKemError::EncodingFailed)?;
-        Ok(Zeroizing::new(document.as_bytes().to_vec()))
+        .map_err(|_| MlKemError::EncodingFailed)
     }
 
     pub const fn parameter_set(&self) -> MlKemParameterSet {
@@ -300,6 +357,8 @@ impl MlDsaParameterSet {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MlDsaError {
     InvalidSeedLength,
+    InvalidExpandedPrivateKey,
+    InvalidPrivateKey,
     InvalidContext,
     InvalidPublicKey,
     InvalidSignature,
@@ -318,12 +377,82 @@ pub enum MlDsaRandomization {
     HedgePreferred,
 }
 
+enum MlDsaKeyMaterial<P: MlDsaParams> {
+    Seeded(Box<SigningKey<P>>),
+    Expanded {
+        key: Box<ExpandedSigningKey<P>>,
+        public: Box<VerifyingKey<P>>,
+    },
+}
+
+/// Validated ML-DSA material. Its private fields keep unchecked expanded keys
+/// out of the shared operation API; the outer handle shares it through Arc.
+pub struct MlDsaKey<P: MlDsaParams>(MlDsaKeyMaterial<P>);
+
+impl<P: MlDsaParams> MlDsaKey<P> {
+    fn from_seed(seed: &Seed) -> Self {
+        Self(MlDsaKeyMaterial::Seeded(Box::new(SigningKey::from_seed(
+            seed,
+        ))))
+    }
+
+    fn from_expanded(encoded: &[u8]) -> Result<Self, MlDsaError> {
+        use signature::Verifier;
+        let key = decode_expanded_ml_dsa::<P>(encoded)?;
+        let public = Box::new(key.verifying_key());
+        // Operational pairwise test, after algebraic validation has made the
+        // untrusted components safe to use in signing (FIPS 204 Algorithms 6–8).
+        let message = b"software-key-core ML-DSA expanded-import pairwise test";
+        let signature = key
+            .sign_deterministic(message, b"")
+            .map_err(|_| MlDsaError::InvalidExpandedPrivateKey)?;
+        public
+            .verify(message, &signature)
+            .map_err(|_| MlDsaError::InvalidExpandedPrivateKey)?;
+        Ok(Self(MlDsaKeyMaterial::Expanded { key, public }))
+    }
+
+    fn expanded_key(&self) -> &ExpandedSigningKey<P> {
+        match &self.0 {
+            MlDsaKeyMaterial::Seeded(key) => key.expanded_key(),
+            MlDsaKeyMaterial::Expanded { key, .. } => key,
+        }
+    }
+
+    fn public_key(&self) -> Vec<u8> {
+        match &self.0 {
+            MlDsaKeyMaterial::Seeded(key) => key.as_ref().as_ref().encode().to_vec(),
+            MlDsaKeyMaterial::Expanded { public, .. } => public.encode().to_vec(),
+        }
+    }
+
+    fn seed(&self) -> Option<Zeroizing<[u8; 32]>> {
+        match &self.0 {
+            MlDsaKeyMaterial::Seeded(key) => Some(Zeroizing::new((*key.as_seed()).into())),
+            MlDsaKeyMaterial::Expanded { .. } => None,
+        }
+    }
+}
+
+// Keep the large by-value dependency return out of the operation/PCT frame.
+#[inline(never)]
+fn decode_expanded_ml_dsa<P: MlDsaParams>(
+    encoded: &[u8],
+) -> Result<Box<ExpandedSigningKey<P>>, MlDsaError> {
+    let encoded = ExpandedSigningKeyBytes::<P>::try_from(encoded)
+        .map_err(|_| MlDsaError::InvalidExpandedPrivateKey)?;
+    match ExpandedSigningKey::<P>::from_expanded_checked(&encoded) {
+        Ok(key) => Ok(Box::new(key)),
+        Err(_) => Err(MlDsaError::InvalidExpandedPrivateKey),
+    }
+}
+
 /// An ML-DSA private key with immutable expanded state shared between handles.
 #[derive(Clone)]
 pub enum MlDsaPrivateKey {
-    MlDsa44(Arc<SigningKey<MlDsa44>>),
-    MlDsa65(Arc<SigningKey<MlDsa65>>),
-    MlDsa87(Arc<SigningKey<MlDsa87>>),
+    MlDsa44(Arc<MlDsaKey<MlDsa44>>),
+    MlDsa65(Arc<MlDsaKey<MlDsa65>>),
+    MlDsa87(Arc<MlDsaKey<MlDsa87>>),
 }
 
 // The `ml-dsa` dependency zeroizes the expanded key when its last owner drops.
@@ -339,31 +468,103 @@ impl fmt::Debug for MlDsaPrivateKey {
 }
 
 impl MlDsaPrivateKey {
+    fn algorithm(&self) -> ::ml_dsa::pkcs8::AlgorithmIdentifierRef<'static> {
+        Self::algorithm_for(self.parameter_set())
+    }
+
+    fn algorithm_for(
+        parameter_set: MlDsaParameterSet,
+    ) -> ::ml_dsa::pkcs8::AlgorithmIdentifierRef<'static> {
+        use ::ml_dsa::pkcs8::spki::AssociatedAlgorithmIdentifier;
+        match parameter_set {
+            MlDsaParameterSet::MlDsa44 => MlDsa44::ALGORITHM_IDENTIFIER,
+            MlDsaParameterSet::MlDsa65 => MlDsa65::ALGORITHM_IDENTIFIER,
+            MlDsaParameterSet::MlDsa87 => MlDsa87::ALGORITHM_IDENTIFIER,
+        }
+    }
+
     pub fn from_pkcs8_der(
         parameter_set: MlDsaParameterSet,
         encoded: &[u8],
     ) -> Result<Self, MlDsaError> {
-        use ::ml_dsa::pkcs8::DecodePrivateKey;
-        match parameter_set {
-            MlDsaParameterSet::MlDsa44 => SigningKey::<MlDsa44>::from_pkcs8_der(encoded)
-                .map(|key| Self::MlDsa44(Arc::new(key))),
-            MlDsaParameterSet::MlDsa65 => SigningKey::<MlDsa65>::from_pkcs8_der(encoded)
-                .map(|key| Self::MlDsa65(Arc::new(key))),
-            MlDsaParameterSet::MlDsa87 => SigningKey::<MlDsa87>::from_pkcs8_der(encoded)
-                .map(|key| Self::MlDsa87(Arc::new(key))),
+        use crate::pqc_key_encoding::{self, PrivateEncoding};
+        let decoded = pqc_key_encoding::decode(encoded, Self::algorithm_for(parameter_set))
+            .map_err(|_| MlDsaError::InvalidPrivateKey)?;
+        let key = match decoded.encoding {
+            PrivateEncoding::Seed(seed) => Self::from_seed_slice(parameter_set, seed)?,
+            PrivateEncoding::Expanded(expanded) => {
+                Self::from_expanded_private_key(parameter_set, expanded)?
+            }
+            PrivateEncoding::Both { seed, expanded } => {
+                Self::from_seed_and_expanded(parameter_set, seed, expanded)?
+            }
+        };
+        if decoded
+            .public
+            .is_some_and(|public| key.public_key() != public)
+        {
+            return Err(MlDsaError::InvalidPrivateKey);
         }
-        .map_err(|_| MlDsaError::InvalidSeedLength)
+        Ok(key)
     }
 
     pub fn to_pkcs8_der(&self) -> Result<Zeroizing<Vec<u8>>, MlDsaError> {
-        use ::ml_dsa::pkcs8::EncodePrivateKey;
-        let document = match self {
-            Self::MlDsa44(key) => key.to_pkcs8_der(),
-            Self::MlDsa65(key) => key.to_pkcs8_der(),
-            Self::MlDsa87(key) => key.to_pkcs8_der(),
+        use crate::pqc_key_encoding::{self, PrivateEncoding};
+        match self.seed() {
+            Some(seed) => pqc_key_encoding::encode(
+                self.algorithm(),
+                PrivateEncoding::Seed(seed.as_ref()),
+                None,
+            ),
+            None => pqc_key_encoding::encode(
+                self.algorithm(),
+                PrivateEncoding::Expanded(&self.expanded_private_key()),
+                None,
+            ),
         }
-        .map_err(|_| MlDsaError::InvalidSeedLength)?;
-        Ok(Zeroizing::new(document.as_bytes().to_vec()))
+        .map_err(|_| MlDsaError::InvalidPrivateKey)
+    }
+
+    /// When both representations are supplied, require an exact seed expansion match.
+    pub fn from_seed_and_expanded(
+        parameter_set: MlDsaParameterSet,
+        seed: &[u8],
+        expanded: &[u8],
+    ) -> Result<Self, MlDsaError> {
+        let key = Self::from_seed_slice(parameter_set, seed)?;
+        if !bool::from(key.expanded_private_key().as_slice().ct_eq(expanded)) {
+            return Err(MlDsaError::InvalidExpandedPrivateKey);
+        }
+        Ok(key)
+    }
+
+    pub fn from_expanded_private_key(
+        parameter_set: MlDsaParameterSet,
+        encoded: &[u8],
+    ) -> Result<Self, MlDsaError> {
+        Ok(match parameter_set {
+            MlDsaParameterSet::MlDsa44 => {
+                Self::MlDsa44(Arc::new(MlDsaKey::from_expanded(encoded)?))
+            }
+            MlDsaParameterSet::MlDsa65 => {
+                Self::MlDsa65(Arc::new(MlDsaKey::from_expanded(encoded)?))
+            }
+            MlDsaParameterSet::MlDsa87 => {
+                Self::MlDsa87(Arc::new(MlDsaKey::from_expanded(encoded)?))
+            }
+        })
+    }
+
+    /// Compact seed or standardized expanded encoding; length distinguishes them.
+    pub fn from_serialized(
+        parameter_set: MlDsaParameterSet,
+        encoded: &[u8],
+    ) -> Result<Self, MlDsaError> {
+        if encoded.len() == 32 {
+            Self::from_seed_slice(parameter_set, encoded)
+        } else {
+            Self::from_expanded_private_key(parameter_set, encoded)
+        }
     }
 
     pub fn generate(parameter_set: MlDsaParameterSet) -> Result<Self, MlDsaError> {
@@ -384,9 +585,9 @@ impl MlDsaPrivateKey {
     ) -> Result<Self, MlDsaError> {
         let seed = Zeroizing::new(Seed::try_from(seed).map_err(|_| MlDsaError::InvalidSeedLength)?);
         Ok(match parameter_set {
-            MlDsaParameterSet::MlDsa44 => Self::MlDsa44(Arc::new(SigningKey::from_seed(&seed))),
-            MlDsaParameterSet::MlDsa65 => Self::MlDsa65(Arc::new(SigningKey::from_seed(&seed))),
-            MlDsaParameterSet::MlDsa87 => Self::MlDsa87(Arc::new(SigningKey::from_seed(&seed))),
+            MlDsaParameterSet::MlDsa44 => Self::MlDsa44(Arc::new(MlDsaKey::from_seed(&seed))),
+            MlDsaParameterSet::MlDsa65 => Self::MlDsa65(Arc::new(MlDsaKey::from_seed(&seed))),
+            MlDsaParameterSet::MlDsa87 => Self::MlDsa87(Arc::new(MlDsaKey::from_seed(&seed))),
         })
     }
 
@@ -398,13 +599,12 @@ impl MlDsaPrivateKey {
         }
     }
 
-    pub fn seed(&self) -> Zeroizing<[u8; 32]> {
-        let bytes = match self {
-            Self::MlDsa44(key) => key.as_seed(),
-            Self::MlDsa65(key) => key.as_seed(),
-            Self::MlDsa87(key) => key.as_seed(),
-        };
-        Zeroizing::new((*bytes).into())
+    pub fn seed(&self) -> Option<Zeroizing<[u8; 32]>> {
+        match self {
+            Self::MlDsa44(key) => key.seed(),
+            Self::MlDsa65(key) => key.seed(),
+            Self::MlDsa87(key) => key.seed(),
+        }
     }
 
     /// Expanded FIPS 204 private-key encoding used by PKCS #11 `CKA_VALUE`.
@@ -421,9 +621,9 @@ impl MlDsaPrivateKey {
         // Borrow the cached verification key: Keypair::verifying_key would
         // clone its expanded matrix merely to encode the public bytes.
         match self {
-            Self::MlDsa44(key) => key.as_ref().as_ref().encode().to_vec(),
-            Self::MlDsa65(key) => key.as_ref().as_ref().encode().to_vec(),
-            Self::MlDsa87(key) => key.as_ref().as_ref().encode().to_vec(),
+            Self::MlDsa44(key) => key.public_key(),
+            Self::MlDsa65(key) => key.public_key(),
+            Self::MlDsa87(key) => key.public_key(),
         }
     }
 
@@ -1029,7 +1229,7 @@ mod tests {
             MlDsaParameterSet::MlDsa87,
         ] {
             let key = MlDsaPrivateKey::from_seed(parameter_set, [7; 32]);
-            assert_eq!(*key.seed(), [7; 32]);
+            assert_eq!(*key.seed().unwrap(), [7; 32]);
             assert_eq!(key.public_key().len(), parameter_set.public_key_length());
             let signature = key.sign_deterministic(b"message", b"context").unwrap();
             assert_eq!(signature.len(), parameter_set.signature_length());
@@ -1069,6 +1269,102 @@ mod tests {
         );
     }
 
+    fn assert_ml_kem_expanded_import_checks_pair(parameter_set: MlKemParameterSet) {
+        let original = MlKemPrivateKey::from_seed(parameter_set, [7; 64]);
+        let encoded = original.expanded_private_key();
+        let imported = MlKemPrivateKey::from_expanded_private_key(parameter_set, &encoded).unwrap();
+        assert_eq!(imported.public_key(), original.public_key());
+        assert_eq!(imported.expanded_private_key(), encoded);
+        assert!(imported.seed().is_none());
+        for randomness in [[1; 32], [0xff; 32]] {
+            let (ciphertext, expected) = ml_kem_encapsulate_deterministic(
+                parameter_set,
+                &original.public_key(),
+                &randomness,
+            )
+            .unwrap();
+            assert_eq!(imported.decapsulate(&ciphertext).unwrap(), expected);
+        }
+
+        // Both halves come from valid keys, and the embedded H(ek) is unchanged.
+        // The dependency's structural/hash checks accept this inconsistent pair.
+        let unrelated = MlKemPrivateKey::from_seed(parameter_set, [9; 64]);
+        let unrelated_encoded = unrelated.expanded_private_key();
+        let private_pke_length = parameter_set.public_key_length() - 32;
+        let mut mismatched = encoded.clone();
+        mismatched[..private_pke_length].copy_from_slice(&unrelated_encoded[..private_pke_length]);
+        assert_eq!(
+            MlKemPrivateKey::from_expanded_private_key(parameter_set, &mismatched).unwrap_err(),
+            MlKemError::InvalidExpandedPrivateKey,
+        );
+    }
+
+    #[test]
+    fn ml_kem_512_expanded_import_checks_pair() {
+        assert_ml_kem_expanded_import_checks_pair(MlKemParameterSet::MlKem512);
+    }
+
+    #[test]
+    fn ml_kem_768_expanded_import_checks_pair() {
+        assert_ml_kem_expanded_import_checks_pair(MlKemParameterSet::MlKem768);
+    }
+
+    #[test]
+    fn ml_kem_1024_expanded_import_checks_pair() {
+        assert_ml_kem_expanded_import_checks_pair(MlKemParameterSet::MlKem1024);
+    }
+
+    #[test]
+    fn ml_kem_expanded_import_rejects_encoding_errors_before_requesting_randomness() {
+        for parameter_set in [
+            MlKemParameterSet::MlKem512,
+            MlKemParameterSet::MlKem768,
+            MlKemParameterSet::MlKem1024,
+        ] {
+            let original = MlKemPrivateKey::from_seed(parameter_set, [7; 64]);
+            let encoded = original.expanded_private_key();
+            let mut bad_hash = encoded.clone();
+            let hash_offset = bad_hash.len() - 64;
+            bad_hash[hash_offset] ^= 1;
+            let mut bad_public = encoded.clone();
+            let public_offset = parameter_set.public_key_length() - 32;
+            // A public coefficient equal to q=3329 is noncanonical. Recompute
+            // H(ek), so the coefficient check must reject independently of it.
+            bad_public[public_offset] = 0x01;
+            bad_public[public_offset + 1] = (bad_public[public_offset + 1] & 0xf0) | 0x0d;
+            let hash = ::sha3::Sha3_256::digest(&bad_public[public_offset..hash_offset]);
+            bad_public[hash_offset..hash_offset + 32].copy_from_slice(&hash);
+            for invalid in [&encoded[..encoded.len() - 1], &bad_hash, &bad_public] {
+                let result = MlKemPrivateKey::from_expanded_private_key_with_randomness(
+                    parameter_set,
+                    invalid,
+                    |_| panic!("malformed encoding must fail before the pairwise test"),
+                );
+                assert_eq!(result.unwrap_err(), MlKemError::InvalidExpandedPrivateKey);
+            }
+        }
+    }
+
+    #[test]
+    fn ml_kem_expanded_import_fails_closed_when_randomness_is_unavailable() {
+        for parameter_set in [
+            MlKemParameterSet::MlKem512,
+            MlKemParameterSet::MlKem768,
+            MlKemParameterSet::MlKem1024,
+        ] {
+            let encoded = MlKemPrivateKey::from_seed(parameter_set, [7; 64]).expanded_private_key();
+            let result = MlKemPrivateKey::from_expanded_private_key_with_randomness(
+                parameter_set,
+                &encoded,
+                |randomness| {
+                    randomness[..16].fill(0xa5); // Also exercise a partially filled buffer on failure.
+                    Err(MlKemError::RandomnessUnavailable)
+                },
+            );
+            assert_eq!(result.unwrap_err(), MlKemError::RandomnessUnavailable);
+        }
+    }
+
     #[test]
     fn ml_kem_rejects_malformed_key_and_ciphertext_lengths() {
         for parameter_set in [
@@ -1101,6 +1397,403 @@ mod tests {
                 Err(MlKemError::InvalidCiphertext)
             );
         }
+    }
+
+    #[test]
+    fn pqc_import_matches_rfc_examples_and_rejects_all_published_bad_keys() {
+        let key = MlDsaPrivateKey::from_pkcs8_der(
+            MlDsaParameterSet::MlDsa44,
+            include_bytes!("../tests/data/pqc-rfc/rfc9881-44-seed.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_some());
+        let expected = key.public_key();
+        let key = MlDsaPrivateKey::from_pkcs8_der(
+            MlDsaParameterSet::MlDsa44,
+            include_bytes!("../tests/data/pqc-rfc/rfc9881-44-expanded.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_none());
+        assert_eq!(key.public_key(), expected);
+        let key = MlDsaPrivateKey::from_pkcs8_der(
+            MlDsaParameterSet::MlDsa44,
+            include_bytes!("../tests/data/pqc-rfc/rfc9881-44-both.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_some());
+        assert_eq!(key.public_key(), expected);
+        let key = MlDsaPrivateKey::from_pkcs8_der(
+            MlDsaParameterSet::MlDsa65,
+            include_bytes!("../tests/data/pqc-rfc/rfc9881-65-seed.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_some());
+        let expected = key.public_key();
+        let key = MlDsaPrivateKey::from_pkcs8_der(
+            MlDsaParameterSet::MlDsa65,
+            include_bytes!("../tests/data/pqc-rfc/rfc9881-65-expanded.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_none());
+        assert_eq!(key.public_key(), expected);
+        let key = MlDsaPrivateKey::from_pkcs8_der(
+            MlDsaParameterSet::MlDsa65,
+            include_bytes!("../tests/data/pqc-rfc/rfc9881-65-both.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_some());
+        assert_eq!(key.public_key(), expected);
+        let key = MlDsaPrivateKey::from_pkcs8_der(
+            MlDsaParameterSet::MlDsa87,
+            include_bytes!("../tests/data/pqc-rfc/rfc9881-87-seed.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_some());
+        let expected = key.public_key();
+        let key = MlDsaPrivateKey::from_pkcs8_der(
+            MlDsaParameterSet::MlDsa87,
+            include_bytes!("../tests/data/pqc-rfc/rfc9881-87-expanded.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_none());
+        assert_eq!(key.public_key(), expected);
+        let key = MlDsaPrivateKey::from_pkcs8_der(
+            MlDsaParameterSet::MlDsa87,
+            include_bytes!("../tests/data/pqc-rfc/rfc9881-87-both.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_some());
+        assert_eq!(key.public_key(), expected);
+        assert!(
+            MlDsaPrivateKey::from_pkcs8_der(
+                MlDsaParameterSet::MlDsa44,
+                include_bytes!("../tests/data/pqc-rfc/rfc9881-44-bad-1.der")
+            )
+            .is_err()
+        );
+        assert!(
+            MlDsaPrivateKey::from_pkcs8_der(
+                MlDsaParameterSet::MlDsa44,
+                include_bytes!("../tests/data/pqc-rfc/rfc9881-44-bad-2.der")
+            )
+            .is_err()
+        );
+        assert!(
+            MlDsaPrivateKey::from_pkcs8_der(
+                MlDsaParameterSet::MlDsa44,
+                include_bytes!("../tests/data/pqc-rfc/rfc9881-44-bad-3.der")
+            )
+            .is_err()
+        );
+        let key = MlKemPrivateKey::from_pkcs8_der(
+            MlKemParameterSet::MlKem512,
+            include_bytes!("../tests/data/pqc-rfc/rfc9935-512-seed.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_some());
+        let expected = key.public_key();
+        let key = MlKemPrivateKey::from_pkcs8_der(
+            MlKemParameterSet::MlKem512,
+            include_bytes!("../tests/data/pqc-rfc/rfc9935-512-expanded.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_none());
+        assert_eq!(key.public_key(), expected);
+        let key = MlKemPrivateKey::from_pkcs8_der(
+            MlKemParameterSet::MlKem512,
+            include_bytes!("../tests/data/pqc-rfc/rfc9935-512-both.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_some());
+        assert_eq!(key.public_key(), expected);
+        let key = MlKemPrivateKey::from_pkcs8_der(
+            MlKemParameterSet::MlKem768,
+            include_bytes!("../tests/data/pqc-rfc/rfc9935-768-seed.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_some());
+        let expected = key.public_key();
+        let key = MlKemPrivateKey::from_pkcs8_der(
+            MlKemParameterSet::MlKem768,
+            include_bytes!("../tests/data/pqc-rfc/rfc9935-768-expanded.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_none());
+        assert_eq!(key.public_key(), expected);
+        let key = MlKemPrivateKey::from_pkcs8_der(
+            MlKemParameterSet::MlKem768,
+            include_bytes!("../tests/data/pqc-rfc/rfc9935-768-both.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_some());
+        assert_eq!(key.public_key(), expected);
+        let key = MlKemPrivateKey::from_pkcs8_der(
+            MlKemParameterSet::MlKem1024,
+            include_bytes!("../tests/data/pqc-rfc/rfc9935-1024-seed.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_some());
+        let expected = key.public_key();
+        let key = MlKemPrivateKey::from_pkcs8_der(
+            MlKemParameterSet::MlKem1024,
+            include_bytes!("../tests/data/pqc-rfc/rfc9935-1024-expanded.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_none());
+        assert_eq!(key.public_key(), expected);
+        let key = MlKemPrivateKey::from_pkcs8_der(
+            MlKemParameterSet::MlKem1024,
+            include_bytes!("../tests/data/pqc-rfc/rfc9935-1024-both.der"),
+        )
+        .unwrap();
+        assert!(key.seed().is_some());
+        assert_eq!(key.public_key(), expected);
+        assert!(
+            MlKemPrivateKey::from_pkcs8_der(
+                MlKemParameterSet::MlKem512,
+                include_bytes!("../tests/data/pqc-rfc/rfc9935-512-bad-1.der")
+            )
+            .is_err()
+        );
+        assert!(
+            MlKemPrivateKey::from_pkcs8_der(
+                MlKemParameterSet::MlKem512,
+                include_bytes!("../tests/data/pqc-rfc/rfc9935-512-bad-2.der")
+            )
+            .is_err()
+        );
+        assert!(
+            MlKemPrivateKey::from_pkcs8_der(
+                MlKemParameterSet::MlKem512,
+                include_bytes!("../tests/data/pqc-rfc/rfc9935-512-bad-3.der")
+            )
+            .is_err()
+        );
+        assert!(
+            MlKemPrivateKey::from_pkcs8_der(
+                MlKemParameterSet::MlKem512,
+                include_bytes!("../tests/data/pqc-rfc/rfc9935-512-bad-4.der")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn expanded_ml_dsa_import_validates_every_parameter_set_on_small_stacks() {
+        for parameter_set in [
+            MlDsaParameterSet::MlDsa44,
+            MlDsaParameterSet::MlDsa65,
+            MlDsaParameterSet::MlDsa87,
+        ] {
+            std::thread::Builder::new()
+                .stack_size(512 * 1024)
+                .spawn(move || {
+                    let seeded = MlDsaPrivateKey::from_seed(parameter_set, [17; 32]);
+                    let expanded = seeded.expanded_private_key();
+                    let imported =
+                        MlDsaPrivateKey::from_expanded_private_key(parameter_set, &expanded)
+                            .unwrap();
+                    assert!(imported.seed().is_none());
+                    assert_eq!(imported.public_key(), seeded.public_key());
+                    let signature = imported
+                        .sign_deterministic(b"imported message", b"import")
+                        .unwrap();
+                    verify_ml_dsa(
+                        parameter_set,
+                        &seeded.public_key(),
+                        b"imported message",
+                        b"import",
+                        &signature,
+                    )
+                    .unwrap();
+                    let digest = [7; 32];
+                    let signature = imported
+                        .sign_prehash(
+                            &digest,
+                            b"import",
+                            MlDsaPrehash::from_id(1).unwrap(),
+                            MlDsaRandomization::Deterministic,
+                        )
+                        .unwrap();
+                    verify_ml_dsa_prehash(
+                        parameter_set,
+                        &seeded.public_key(),
+                        &digest,
+                        b"import",
+                        &signature,
+                        MlDsaPrehash::from_id(1).unwrap(),
+                    )
+                    .unwrap();
+                    let serialized =
+                        crate::software_signing::SoftwareSigningKey::MlDsa(imported.clone())
+                            .serialized()
+                            .unwrap();
+                    assert_eq!(serialized.as_slice(), expanded.as_slice());
+                    let restored =
+                        MlDsaPrivateKey::from_serialized(parameter_set, &serialized).unwrap();
+                    assert_eq!(restored.public_key(), imported.public_key());
+                    let der = imported.to_pkcs8_der().unwrap();
+                    let restored = MlDsaPrivateKey::from_pkcs8_der(parameter_set, &der).unwrap();
+                    assert!(restored.seed().is_none());
+                    assert_eq!(restored.expanded_private_key(), expanded);
+                    for offset in [0, 64, 128, expanded.len() - 1] {
+                        let mut bad = expanded.clone();
+                        bad[offset] ^= 1;
+                        assert!(matches!(
+                            MlDsaPrivateKey::from_expanded_private_key(parameter_set, &bad),
+                            Err(MlDsaError::InvalidExpandedPrivateKey)
+                        ));
+                    }
+                    let mut bad = expanded.clone();
+                    bad[128] = 0xff;
+                    assert!(
+                        MlDsaPrivateKey::from_expanded_private_key(parameter_set, &bad).is_err()
+                    );
+                    assert!(
+                        MlDsaPrivateKey::from_expanded_private_key(
+                            parameter_set,
+                            &expanded[..expanded.len() - 1]
+                        )
+                        .is_err()
+                    );
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn pqc_pkcs8_accepts_all_standard_choices_and_checks_redundant_material() {
+        use crate::pqc_key_encoding::{self, PrivateEncoding};
+        for params in [
+            MlDsaParameterSet::MlDsa44,
+            MlDsaParameterSet::MlDsa65,
+            MlDsaParameterSet::MlDsa87,
+        ] {
+            let seed = [11; 32];
+            let key = MlDsaPrivateKey::from_seed(params, seed);
+            let expanded = key.expanded_private_key();
+            let algorithm = MlDsaPrivateKey::algorithm_for(params);
+            for encoding in [
+                PrivateEncoding::Seed(&seed),
+                PrivateEncoding::Expanded(&expanded),
+                PrivateEncoding::Both {
+                    seed: &seed,
+                    expanded: &expanded,
+                },
+            ] {
+                let der =
+                    pqc_key_encoding::encode(algorithm, encoding, Some(&key.public_key())).unwrap();
+                let restored = MlDsaPrivateKey::from_pkcs8_der(params, &der).unwrap();
+                assert_eq!(restored.public_key(), key.public_key());
+            }
+            let mut bad = expanded.clone();
+            bad[32] ^= 1; // K does not change the public key.
+            assert!(MlDsaPrivateKey::from_expanded_private_key(params, &bad).is_ok());
+            let der = pqc_key_encoding::encode(
+                algorithm,
+                PrivateEncoding::Both {
+                    seed: &seed,
+                    expanded: &bad,
+                },
+                None,
+            )
+            .unwrap();
+            assert!(MlDsaPrivateKey::from_pkcs8_der(params, &der).is_err());
+            let other = MlDsaPrivateKey::from_seed(params, [12; 32]);
+            let der = pqc_key_encoding::encode(
+                algorithm,
+                PrivateEncoding::Seed(&seed),
+                Some(&other.public_key()),
+            )
+            .unwrap();
+            assert!(MlDsaPrivateKey::from_pkcs8_der(params, &der).is_err());
+            check_bad_pqc_der(algorithm, &key.to_pkcs8_der().unwrap(), |bad| {
+                MlDsaPrivateKey::from_pkcs8_der(params, bad).is_err()
+            });
+        }
+        for params in [
+            MlKemParameterSet::MlKem512,
+            MlKemParameterSet::MlKem768,
+            MlKemParameterSet::MlKem1024,
+        ] {
+            let seed = [11; 64];
+            let key = MlKemPrivateKey::from_seed(params, seed);
+            let expanded = key.expanded_private_key();
+            let algorithm = MlKemPrivateKey::algorithm_for(params);
+            for encoding in [
+                PrivateEncoding::Seed(&seed),
+                PrivateEncoding::Expanded(&expanded),
+                PrivateEncoding::Both {
+                    seed: &seed,
+                    expanded: &expanded,
+                },
+            ] {
+                let der =
+                    pqc_key_encoding::encode(algorithm, encoding, Some(&key.public_key())).unwrap();
+                let restored = MlKemPrivateKey::from_pkcs8_der(params, &der).unwrap();
+                assert_eq!(restored.expanded_private_key(), expanded);
+            }
+            let imported = MlKemPrivateKey::from_expanded_private_key(params, &expanded).unwrap();
+            let der = imported.to_pkcs8_der().unwrap();
+            let restored = MlKemPrivateKey::from_pkcs8_der(params, &der).unwrap();
+            assert!(restored.seed().is_none());
+            assert_eq!(restored.expanded_private_key(), expanded);
+            let mut bad = expanded.clone();
+            let last = bad.len() - 1;
+            bad[last] ^= 1; // z cannot be checked without seed.
+            assert!(MlKemPrivateKey::from_expanded_private_key(params, &bad).is_ok());
+            let der = pqc_key_encoding::encode(
+                algorithm,
+                PrivateEncoding::Both {
+                    seed: &seed,
+                    expanded: &bad,
+                },
+                None,
+            )
+            .unwrap();
+            assert!(MlKemPrivateKey::from_pkcs8_der(params, &der).is_err());
+            let other = MlKemPrivateKey::from_seed(params, [12; 64]);
+            let der = pqc_key_encoding::encode(
+                algorithm,
+                PrivateEncoding::Seed(&seed),
+                Some(&other.public_key()),
+            )
+            .unwrap();
+            assert!(MlKemPrivateKey::from_pkcs8_der(params, &der).is_err());
+            check_bad_pqc_der(algorithm, &key.to_pkcs8_der().unwrap(), |bad| {
+                MlKemPrivateKey::from_pkcs8_der(params, bad).is_err()
+            });
+        }
+    }
+
+    fn check_bad_pqc_der(
+        algorithm: ml_dsa::pkcs8::AlgorithmIdentifierRef<'static>,
+        valid: &[u8],
+        rejects: impl Fn(&[u8]) -> bool,
+    ) {
+        use ml_dsa::pkcs8::{
+            PrivateKeyInfoRef,
+            der::{
+                Decode, Encode,
+                asn1::{AnyRef, OctetStringRef},
+            },
+        };
+        let mut trailing = valid.to_vec();
+        trailing.push(0);
+        assert!(rejects(&trailing));
+        let mut info = PrivateKeyInfoRef::from_der(valid).unwrap();
+        info.algorithm.parameters = Some(AnyRef::NULL);
+        assert!(rejects(&info.to_der().unwrap()));
+        info.algorithm = algorithm;
+        info.algorithm.oid = ml_dsa::pkcs8::ObjectIdentifier::new_unwrap("1.3.101.112");
+        assert!(rejects(&info.to_der().unwrap()));
+        info.algorithm = algorithm;
+        let mut private = info.private_key.as_bytes().to_vec();
+        private.push(0);
+        info.private_key = OctetStringRef::new(&private).unwrap();
+        assert!(rejects(&info.to_der().unwrap()));
     }
 
     #[test]
@@ -1137,7 +1830,7 @@ mod tests {
                     let generated = MlDsaPrivateKey::generate(parameter_set).unwrap();
                     assert!(matches!(
                         MlDsaPrivateKey::from_pkcs8_der(parameter_set, &[0; 16]),
-                        Err(MlDsaError::InvalidSeedLength)
+                        Err(MlDsaError::InvalidPrivateKey)
                     ));
                     (seeded, restored, generated)
                 })
@@ -1145,8 +1838,8 @@ mod tests {
                 .join()
                 .unwrap();
 
-            assert_eq!(*seeded.seed(), [7; 32]);
-            assert_eq!(*restored.seed(), [7; 32]);
+            assert_eq!(*seeded.seed().unwrap(), [7; 32]);
+            assert_eq!(*restored.seed().unwrap(), [7; 32]);
             assert_eq!(seeded.public_key(), restored.public_key());
             // Exercise returned keys after the construction caller has exited.
             std::thread::Builder::new()

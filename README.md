@@ -38,6 +38,16 @@ Ed25519 and Ed448 public points and signatures use the shared
 their full 32-byte or 57-byte input domain; weak-key and encoding checks apply
 to public points and signature verification.
 
+Expanded ML-KEM private imports use the shared
+[key validation policy](docs/ml-kem-key-validation.md): encoding and hash checks
+followed by randomized encapsulation/decapsulation pairwise consistency for all
+three parameter sets. Expanded ML-DSA imports use the shared
+[ML-DSA validation policy](docs/ml-dsa-key-validation.md): coefficient ranges,
+`tr`/`t0` consistency and a signing/verification pairwise test. Both algorithms
+accept RFC PKCS #8 seed, expanded and combined encodings; combined forms must
+match completely. Seed-only protocols and concrete hybrid seed formats retain
+their own acceptance policy.
+
 The `x509-validation` feature validates configured certificate roots and
 explicitly provisioned P-256 CA public keys with the portable RFC 5280 validator.
 A bare key is represented as an RFC 5914 trust anchor, without fabricating a

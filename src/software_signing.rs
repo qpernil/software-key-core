@@ -1494,7 +1494,7 @@ impl SoftwareSigningKey {
                 .map(Self::Rsa)
                 .map_err(rsa_key_error),
             SignatureScheme::MlDsa(parameter_set) => {
-                MlDsaPrivateKey::from_seed_slice(parameter_set, serialized)
+                MlDsaPrivateKey::from_serialized(parameter_set, serialized)
                     .map(Self::MlDsa)
                     .map_err(|_| SoftwareSigningError::InvalidPrivateKey)
             }
@@ -1544,7 +1544,10 @@ impl SoftwareSigningKey {
                 .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?
                 .as_bytes()
                 .to_vec(),
-            Self::MlDsa(key) => key.seed().to_vec(),
+            Self::MlDsa(key) => key
+                .seed()
+                .map(|seed| seed.to_vec())
+                .unwrap_or_else(|| key.expanded_private_key().to_vec()),
         };
         Ok(Zeroizing::new(serialized))
     }

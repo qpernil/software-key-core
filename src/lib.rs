@@ -58,3 +58,5 @@ mod zeroization_tests {
 
 #[cfg(test)]
 mod kat;
+
+mod pqc_key_encoding;
