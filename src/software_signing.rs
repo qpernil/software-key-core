@@ -1544,10 +1544,7 @@ impl SoftwareSigningKey {
                 .map_err(|_| SoftwareSigningError::InvalidPrivateKey)?
                 .as_bytes()
                 .to_vec(),
-            Self::MlDsa(key) => key
-                .seed()
-                .map(|seed| seed.to_vec())
-                .unwrap_or_else(|| key.expanded_private_key().to_vec()),
+            Self::MlDsa(key) => return Ok(key.serialized()),
         };
         Ok(Zeroizing::new(serialized))
     }

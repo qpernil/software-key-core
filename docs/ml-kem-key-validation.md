@@ -29,6 +29,14 @@ expanded bytes must match the seed expansion, including the rejection secret
 key must match as well. Export prefers the retained seed, or uses expanded
 encoding when no seed is available. Expanded import does not recreate a seed.
 
+The PKCS #11 software token, virtual PIV, and virtual YubiHSM share
+`from_components` for seed, expanded, and combined standalone imports.
+`from_serialized` accepts exact-length raw seeds, expanded keys, and seed
+followed by expanded key. `serialized` emits the retained seed or, when no
+seed exists, the expanded key. Virtual-device persistence uses this raw form;
+the software token uses the corresponding PKCS #8 representation. Validation
+also applies when restoring expanded records.
+
 ## References
 
 [FIPS 203 section 7.1](https://nvlpubs.nist.gov/nistpubs/fips/nist.fips.203.pdf)
