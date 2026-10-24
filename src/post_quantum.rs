@@ -77,6 +77,46 @@ impl fmt::Debug for MlKemPrivateKey {
 }
 
 impl MlKemPrivateKey {
+    /// Raw seed, expanded key, or seed followed by expanded key. Exact,
+    /// parameter-set-specific lengths distinguish the three representations.
+    pub fn from_serialized(
+        parameter_set: MlKemParameterSet,
+        encoded: &[u8],
+    ) -> Result<Self, MlKemError> {
+        if encoded.len() == 64 {
+            Self::from_components(parameter_set, Some(encoded), None)
+        } else if encoded.len() == 64 + parameter_set.expanded_private_key_length() {
+            let (seed, expanded) = encoded.split_at(64);
+            Self::from_components(parameter_set, Some(seed), Some(expanded))
+        } else {
+            Self::from_components(parameter_set, None, Some(encoded))
+        }
+    }
+
+    /// Import raw FIPS private components with one shared consistency policy.
+    pub fn from_components(
+        parameter_set: MlKemParameterSet,
+        seed: Option<&[u8]>,
+        expanded: Option<&[u8]>,
+    ) -> Result<Self, MlKemError> {
+        match (seed, expanded) {
+            (Some(seed), Some(expanded)) => {
+                Self::from_seed_and_expanded(parameter_set, seed, expanded)
+            }
+            (Some(seed), None) => Self::from_seed_slice(parameter_set, seed),
+            (None, Some(expanded)) => Self::from_expanded_private_key(parameter_set, expanded),
+            (None, None) => Err(MlKemError::InvalidPrivateKey),
+        }
+    }
+
+    /// Canonical raw storage: retain the seed when known, otherwise the
+    /// expanded private encoding. Never synthesize a seed for an imported key.
+    pub fn serialized(&self) -> Zeroizing<Vec<u8>> {
+        self.seed()
+            .map(|seed| Zeroizing::new(seed.to_vec()))
+            .unwrap_or_else(|| self.expanded_private_key())
+    }
+
     pub fn generate(parameter_set: MlKemParameterSet) -> Result<Self, MlKemError> {
         let mut seed = Zeroizing::new([0u8; 64]);
         getrandom::fill(seed.as_mut()).map_err(|_| MlKemError::RandomnessUnavailable)?;
@@ -337,6 +377,14 @@ pub enum MlDsaParameterSet {
 }
 
 impl MlDsaParameterSet {
+    pub const fn expanded_private_key_length(self) -> usize {
+        match self {
+            Self::MlDsa44 => 2_560,
+            Self::MlDsa65 => 4_032,
+            Self::MlDsa87 => 4_896,
+        }
+    }
+
     pub const fn public_key_length(self) -> usize {
         match self {
             Self::MlDsa44 => 1_312,
@@ -468,6 +516,30 @@ impl fmt::Debug for MlDsaPrivateKey {
 }
 
 impl MlDsaPrivateKey {
+    /// Import raw FIPS private components with one shared consistency policy.
+    pub fn from_components(
+        parameter_set: MlDsaParameterSet,
+        seed: Option<&[u8]>,
+        expanded: Option<&[u8]>,
+    ) -> Result<Self, MlDsaError> {
+        match (seed, expanded) {
+            (Some(seed), Some(expanded)) => {
+                Self::from_seed_and_expanded(parameter_set, seed, expanded)
+            }
+            (Some(seed), None) => Self::from_seed_slice(parameter_set, seed),
+            (None, Some(expanded)) => Self::from_expanded_private_key(parameter_set, expanded),
+            (None, None) => Err(MlDsaError::InvalidPrivateKey),
+        }
+    }
+
+    /// Canonical raw storage: retain the seed when known, otherwise the
+    /// expanded private encoding. Never synthesize a seed for an imported key.
+    pub fn serialized(&self) -> Zeroizing<Vec<u8>> {
+        self.seed()
+            .map(|seed| Zeroizing::new(seed.to_vec()))
+            .unwrap_or_else(|| self.expanded_private_key())
+    }
+
     fn algorithm(&self) -> ::ml_dsa::pkcs8::AlgorithmIdentifierRef<'static> {
         Self::algorithm_for(self.parameter_set())
     }
@@ -555,15 +627,19 @@ impl MlDsaPrivateKey {
         })
     }
 
-    /// Compact seed or standardized expanded encoding; length distinguishes them.
+    /// Raw seed, expanded key, or seed followed by expanded key. Exact,
+    /// parameter-set-specific lengths distinguish the three representations.
     pub fn from_serialized(
         parameter_set: MlDsaParameterSet,
         encoded: &[u8],
     ) -> Result<Self, MlDsaError> {
         if encoded.len() == 32 {
-            Self::from_seed_slice(parameter_set, encoded)
+            Self::from_components(parameter_set, Some(encoded), None)
+        } else if encoded.len() == 32 + parameter_set.expanded_private_key_length() {
+            let (seed, expanded) = encoded.split_at(32);
+            Self::from_components(parameter_set, Some(seed), Some(expanded))
         } else {
-            Self::from_expanded_private_key(parameter_set, encoded)
+            Self::from_components(parameter_set, None, Some(encoded))
         }
     }
 
@@ -1964,6 +2040,67 @@ mod tests {
                 &signature[..signature.len() - 1],
             ),
             Err(MlDsaError::InvalidSignature)
+        );
+    }
+    #[test]
+    fn raw_private_encodings_share_component_validation_and_preserve_seed_availability() {
+        macro_rules! check {
+            ($key:ident, $params:expr, $size:expr) => {
+                for parameters in $params {
+                    let seed = [7; $size];
+                    let original = $key::from_seed(parameters, seed);
+                    let expanded = original.expanded_private_key();
+                    let both = Zeroizing::new([seed.as_slice(), expanded.as_slice()].concat());
+                    for (encoded, has_seed) in [
+                        (seed.as_slice(), true),
+                        (expanded.as_slice(), false),
+                        (both.as_slice(), true),
+                    ] {
+                        let key = $key::from_serialized(parameters, encoded).unwrap();
+                        assert_eq!(key.public_key(), original.public_key());
+                        assert_eq!(key.expanded_private_key(), expanded);
+                        assert_eq!(key.seed().is_some(), has_seed);
+                        let stored = key.serialized();
+                        assert_eq!(
+                            stored.as_slice(),
+                            if has_seed {
+                                seed.as_slice()
+                            } else {
+                                expanded.as_slice()
+                            }
+                        );
+                        let restored = $key::from_serialized(parameters, &stored).unwrap();
+                        assert_eq!(restored.seed().is_some(), has_seed);
+                        assert_eq!(restored.expanded_private_key(), expanded);
+                        assert!(
+                            $key::from_serialized(parameters, &encoded[..encoded.len() - 1])
+                                .is_err()
+                        );
+                    }
+                    let mut inconsistent = both;
+                    inconsistent[0] ^= 1;
+                    assert!($key::from_serialized(parameters, &inconsistent).is_err());
+                    assert!($key::from_components(parameters, None, None).is_err());
+                }
+            };
+        }
+        check!(
+            MlDsaPrivateKey,
+            [
+                MlDsaParameterSet::MlDsa44,
+                MlDsaParameterSet::MlDsa65,
+                MlDsaParameterSet::MlDsa87
+            ],
+            32
+        );
+        check!(
+            MlKemPrivateKey,
+            [
+                MlKemParameterSet::MlKem512,
+                MlKemParameterSet::MlKem768,
+                MlKemParameterSet::MlKem1024
+            ],
+            64
         );
     }
 }

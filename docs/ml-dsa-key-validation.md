@@ -45,8 +45,13 @@ import checks.
 
 ## Protocol policy and tests
 
-Shared support for an encoding does not broaden every device protocol. Virtual
-YubiHSM and virtual YubiKey native PQC imports retain their seed formats.
+The PKCS #11 software token, virtual PIV, and virtual YubiHSM use the same
+`from_components` validation for seed, expanded, and combined standalone keys.
+`from_serialized` accepts an exact-length raw seed, expanded key, or seed
+followed by its expanded key. `serialized` preserves a known seed and otherwise
+returns the expanded encoding. Virtual-device persistence uses that canonical
+raw representation; the software token uses the equivalent PKCS #8 choice.
+Protocol adapters retain authorization, framing, and error mapping.
 Concrete hybrid KEMs retain a single 32-byte seed deriving both components;
 separately supplied expanded component keys are not an accepted hybrid format.
 
