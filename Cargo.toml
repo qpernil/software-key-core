@@ -36,7 +36,7 @@ hkdf = "0.13.0"
 hmac = "0.13.0"
 k256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "std"] }
 ml-dsa = { git = "https://github.com/qpernil/signatures.git", rev = "0488ce78a45e955a1a49104fa23ce5be461d1243", default-features = false, features = ["alloc", "getrandom", "pkcs8", "zeroize"] }
-ml-kem = { version = "0.3.2", features = ["pkcs8", "zeroize"] }
+ml-kem = { version = "0.3.3", features = ["pkcs8", "zeroize"] }
 num-bigint-dig = "0.8.6"
 num-integer = "0.1.47"
 pbkdf2 = { version = "0.13.0", features = ["hmac"] }
@@ -59,7 +59,7 @@ x448 = { version = "0.14.0-pre.12", default-features = false, features = ["stati
 zeroize = "1.9.0"
 
 [target.'cfg(unix)'.dependencies]
-libc = { version = "0.2.189", optional = true }
+libc = { version = "0.2.191", optional = true }
 
 [dev-dependencies]
 rand = "0.8.8"

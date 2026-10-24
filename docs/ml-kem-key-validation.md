@@ -11,6 +11,9 @@ the shared import boundary performs one randomized pairwise consistency test:
 3. Decapsulate the resulting ciphertext using the candidate private key.
 4. Compare the two 32-byte shared secrets in constant time; reject a mismatch.
 
+The ML-KEM dependency uses arithmetic CBD sampling without secret-indexed
+lookup tables, including during key generation and decapsulation.
+
 ML-KEM decapsulation uses implicit rejection: it returns a secret even when
 ciphertext verification fails. A successful call is therefore insufficient;
 the two secrets must match. Inconsistent pairs return `InvalidExpandedPrivateKey`.
