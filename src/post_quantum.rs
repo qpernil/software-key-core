@@ -4,6 +4,8 @@
 //! in their callers. This module deliberately operates on raw FIPS 204 keys,
 //! messages, contexts, and signatures so it can also be reused by `pkcs11rs`.
 
+mod ml_dsa_validation;
+
 use ::ml_dsa::{
     EncodedVerifyingKey, ExpandedSigningKey, ExpandedSigningKeyBytes, MlDsa44, MlDsa65, MlDsa87,
     MlDsaParams, Seed, Signature, SigningKey, VerifyingKey,
@@ -448,6 +450,16 @@ impl<P: MlDsaParams> MlDsaKey<P> {
         use signature::Verifier;
         let key = decode_expanded_ml_dsa::<P>(encoded)?;
         let public = Box::new(key.verifying_key());
+        // The public derivation uses rho, s1 and s2. Bind the supplied tr to it
+        // before letting untrusted expanded material reach signing.
+        use sha3::digest::{ExtendableOutput, Update, XofReader};
+        let mut hash = sha3::Shake256::default();
+        hash.update(&public.encode());
+        let mut expected_tr = [0u8; 64];
+        hash.finalize_xof().read(&mut expected_tr);
+        if !bool::from(expected_tr.ct_eq(&encoded[64..128])) {
+            return Err(MlDsaError::InvalidExpandedPrivateKey);
+        }
         // Operational pairwise test, after algebraic validation has made the
         // untrusted components safe to use in signing (FIPS 204 Algorithms 6–8).
         let message = b"software-key-core ML-DSA expanded-import pairwise test";
@@ -487,12 +499,13 @@ impl<P: MlDsaParams> MlDsaKey<P> {
 fn decode_expanded_ml_dsa<P: MlDsaParams>(
     encoded: &[u8],
 ) -> Result<Box<ExpandedSigningKey<P>>, MlDsaError> {
-    let encoded = ExpandedSigningKeyBytes::<P>::try_from(encoded)
-        .map_err(|_| MlDsaError::InvalidExpandedPrivateKey)?;
-    match ExpandedSigningKey::<P>::from_expanded_checked(&encoded) {
-        Ok(key) => Ok(Box::new(key)),
-        Err(_) => Err(MlDsaError::InvalidExpandedPrivateKey),
-    }
+    let encoded = Zeroizing::new(
+        ExpandedSigningKeyBytes::<P>::try_from(encoded)
+            .map_err(|_| MlDsaError::InvalidExpandedPrivateKey)?,
+    );
+    ml_dsa_validation::validate::<P>(&encoded)?;
+    #[allow(deprecated)]
+    Ok(Box::new(ExpandedSigningKey::<P>::from_expanded(&encoded)))
 }
 
 /// An ML-DSA private key with immutable expanded state shared between handles.

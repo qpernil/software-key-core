@@ -5,14 +5,22 @@ expanded FIPS 204 private encodings for ML-DSA-44 (2,560 bytes), ML-DSA-65
 (4,032 bytes), and ML-DSA-87 (4,896 bytes). A seed derives a complete pair;
 expanded import validates independently supplied private components.
 
-Before any signing, the checked decoder in the pinned `signatures` fork:
+Before any signing, `software-key-core` validates expanded material using the
+public API of the pinned minimal ML-DSA stack-usage PR:
 
 1. Checks the exact length and the packed `s1`/`s2` coefficient ranges. Reserved
    encodings return an error before the legacy decoder's assertions can run.
-2. Computes `t = A*s1 + s2` with the library's existing lattice arithmetic.
+2. Computes `t = A*s1 + s2` with application-side FIPS 204 NTT/ExpandA
+   operations and the released `module-lattice` field arithmetic. Secret
+   validation vectors use zeroizing storage; matrix sampling uses public data.
 3. Requires the supplied `t0` to equal `Power2Round(t)`'s low part.
-4. Derives the public key from `rho` and the high part `t1`, and checks that
-   its hash equals the supplied `tr`, using constant-time comparisons.
+4. Uses the dependency's public API to derive the public key from `rho` and
+   the high part `t1`, and checks that its hash equals the supplied `tr`,
+   using constant-time comparisons.
+
+The `signatures` dependency contains only the matrix stack-usage fix; it has
+no downstream import-validation API. Its expanded decoder is called only after
+coefficient and `t0` validation.
 
 The shared boundary then signs a fixed test message and verifies it with the
 derived public key. The validated private holder and cached public key are
