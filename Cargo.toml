@@ -35,8 +35,9 @@ ghash = "0.6.0"
 hkdf = "0.13.0"
 hmac = "0.13.0"
 k256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "std"] }
-ml-dsa = { git = "https://github.com/qpernil/signatures.git", rev = "0488ce78a45e955a1a49104fa23ce5be461d1243", default-features = false, features = ["alloc", "getrandom", "pkcs8", "zeroize"] }
+ml-dsa = { git = "https://github.com/qpernil/signatures.git", rev = "a08a14910652a3737b8de83d18ad33704853d9db", default-features = false, features = ["alloc", "getrandom", "pkcs8", "zeroize"] }
 ml-kem = { version = "0.3.3", features = ["pkcs8", "zeroize"] }
+module-lattice = { version = "0.2.3", features = ["zeroize"] }
 num-bigint-dig = "0.8.6"
 num-integer = "0.1.47"
 pbkdf2 = { version = "0.13.0", features = ["hmac"] }
