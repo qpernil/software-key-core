@@ -78,10 +78,13 @@ ML-DSA public-key validation and SubjectPublicKeyInfo encoding operate on the
 fixed-size raw encoding without expanding a verification matrix. Every
 correctly sized FIPS 204 public-key encoding is decodable. Tests compare DER
 against the upstream encoder for all parameter sets and exercise metadata
-operations on a 64 KiB stack. With allocation enabled, the pinned ML-DSA
-implementation stores private matrices as `MaybeBox` rows, so sampling and
-cloning avoid a full inline matrix. The public lattice types and constructors
-are unchanged; other vectors and intermediate values still use stack space.
+operations on a 64 KiB stack. ML-DSA follows the upstream
+[RustCrypto/signatures](https://github.com/RustCrypto/signatures) default branch
+without a revision pin; Cargo.lock records the resolved commit. With allocation
+enabled, the ML-DSA implementation stores private matrices as `MaybeBox` rows,
+so sampling and cloning avoid a full inline matrix. The public lattice types
+and constructors are unchanged; other vectors and intermediate values still
+use stack space.
 Private-key generation and import, public-key construction, signing, and
 verification run directly on the caller's thread. Tests cover all three
 ML-DSA parameter sets on 512 KiB stacks, including unoptimized builds. This is

@@ -6,7 +6,7 @@ expanded FIPS 204 private encodings for ML-DSA-44 (2,560 bytes), ML-DSA-65
 expanded import validates independently supplied private components.
 
 Before any signing, `software-key-core` validates expanded material using the
-public API of the pinned minimal ML-DSA stack-usage PR:
+public API of upstream RustCrypto ML-DSA:
 
 1. Checks the exact length and the packed `s1`/`s2` coefficient ranges. Reserved
    encodings return an error before the legacy decoder's assertions can run.
@@ -18,9 +18,10 @@ public API of the pinned minimal ML-DSA stack-usage PR:
    the high part `t1`, and checks that its hash equals the supplied `tr`,
    using constant-time comparisons.
 
-The `signatures` dependency contains only the matrix stack-usage fix; it has
-no downstream import-validation API. Its expanded decoder is called only after
-coefficient and `t0` validation.
+The upstream `signatures` dependency includes row-allocated matrices to limit
+stack usage; expanded-key import validation remains in `software-key-core`.
+The dependency's expanded decoder is called only after coefficient and `t0`
+validation.
 
 The shared boundary then signs a fixed test message and verifies it with the
 derived public key. The validated private holder and cached public key are
