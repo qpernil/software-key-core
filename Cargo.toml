@@ -16,7 +16,7 @@ x509-validation = ["dep:const-oid", "dep:der", "dep:spki", "dep:x509-cert", "dep
 [dependencies]
 certval = { version = "0.2.0-rc.1", default-features = false, features = ["std"], optional = true }
 const-oid = { version = "0.10.2", optional = true }
-der = { version = "0.8.1", features = ["alloc", "derive", "std"], optional = true }
+der = { version = "0.8.3", features = ["alloc", "derive", "std"], optional = true }
 spki = { version = "0.8.0", features = ["alloc", "std"], optional = true }
 x509-cert = { version = "0.3.0", default-features = false, features = ["std"], optional = true }
 rustls-pki-types = { version = "1.15.1", optional = true }
@@ -48,7 +48,7 @@ p224 = { version = "0.14.0-rc.15", default-features = false, features = ["ecdh",
 p384 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "precomputed-tables", "std"] }
 p521 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "std"] }
 ecdsa = "0.17.0"
-elliptic-curve = { version = "0.14.1", features = ["ecdh", "pkcs8"] }
+elliptic-curve = { version = "0.14.3", features = ["ecdh", "pkcs8"] }
 primefield = "0.14.0"
 primeorder = "0.14.0"
 rsa = { version = "0.9.10", default-features = false, features = ["hazmat", "std", "u64_digit"] }
