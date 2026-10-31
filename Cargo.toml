@@ -14,7 +14,7 @@ x509-signing = ["dep:const-oid", "dep:der", "dep:spki"]
 x509-validation = ["dep:const-oid", "dep:der", "dep:spki", "dep:x509-cert", "dep:rustls-pki-types", "dep:webpki", "dep:certval"]
 
 [dependencies]
-certval = { git = "https://github.com/carl-wallace/rust-pki", rev = "7b45426af9a1b99b5f5aa5c348deea8c338412b5", default-features = false, features = ["std"], optional = true }
+certval = { version = "0.2.0-rc.1", default-features = false, features = ["std"], optional = true }
 const-oid = { version = "0.10.2", optional = true }
 der = { version = "0.8.1", features = ["alloc", "derive", "std"], optional = true }
 spki = { version = "0.8.0", features = ["alloc", "std"], optional = true }
@@ -35,14 +35,16 @@ ghash = "0.6.0"
 hkdf = "0.13.0"
 hmac = "0.13.0"
 k256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "std"] }
-ml-dsa = { git = "https://github.com/RustCrypto/signatures.git", default-features = false, features = ["alloc", "getrandom", "pkcs8", "zeroize"] }
+# Temporary pin for the matrix stack fix; switch to a crates.io release
+# once it includes the fix and passes the 512 KiB stack tests.
+ml-dsa = { git = "https://github.com/RustCrypto/signatures.git", rev = "a3690c4a0bd861fcf2bde0e38b3609e86c3fe89e", default-features = false, features = ["alloc", "getrandom", "pkcs8", "zeroize"] }
 ml-kem = { version = "0.3.3", features = ["pkcs8", "zeroize"] }
 module-lattice = { version = "0.2.3", features = ["zeroize"] }
 num-bigint-dig = "0.8.6"
 num-integer = "0.1.47"
 pbkdf2 = { version = "0.13.0", features = ["hmac"] }
 p256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "precomputed-tables", "std"] }
-p224 = { version = "=0.14.0-rc.15", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "std"] }
+p224 = { version = "0.14.0-rc.15", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "std"] }
 p384 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "precomputed-tables", "std"] }
 p521 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "std"] }
 ecdsa = "0.17.0"
@@ -66,7 +68,3 @@ libc = { version = "0.2.191", optional = true }
 rand = "0.8.8"
 serde_json = "1.0.149"
 flate2 = "1.1.9"
-
-[patch.crates-io]
-# certval requires x509-ocsp 0.3, which is not yet published on crates.io.
-x509-ocsp = { git = "https://github.com/RustCrypto/formats.git", rev = "2c0b0f99cf2bbc0738edc4e439e97dcc204099f5" }
