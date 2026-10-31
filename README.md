@@ -78,10 +78,13 @@ ML-DSA public-key validation and SubjectPublicKeyInfo encoding operate on the
 fixed-size raw encoding without expanding a verification matrix. Every
 correctly sized FIPS 204 public-key encoding is decodable. Tests compare DER
 against the upstream encoder for all parameter sets and exercise metadata
-operations on a 64 KiB stack. ML-DSA follows the upstream
-[RustCrypto/signatures](https://github.com/RustCrypto/signatures) default branch
-without a revision pin; Cargo.lock records the resolved commit. With allocation
-enabled, the ML-DSA implementation stores private matrices as `MaybeBox` rows,
+operations on a 64 KiB stack. ML-DSA uses upstream
+[RustCrypto/signatures](https://github.com/RustCrypto/signatures) commit
+`a3690c4a0bd861fcf2bde0e38b3609e86c3fe89e`, pinned in the dependency manifest.
+The pin retains the matrix stack fix until a crates.io release includes it and
+passes the 512 KiB stack tests in debug and release builds; then use a normal
+compatible version requirement. With allocation enabled, the ML-DSA
+implementation stores private matrices as `MaybeBox` rows,
 so sampling and cloning avoid a full inline matrix. The public lattice types
 and constructors are unchanged; other vectors and intermediate values still
 use stack space.
@@ -136,9 +139,9 @@ portable `certval` RFC 5280 path validation, including critical certificate
 policies, name constraints, policy constraints, and CA path limits. Signature
 verification retains the ring-backed algorithm allowlist. Revocation fetching is
 not enabled. Bare P-256 CA-key trust retains the webpki path and has no
-certificate-based anchor validity or constraints. Consumers enabling
-`x509-validation` must include the pinned `x509-ocsp` crates.io patch from this
-manifest in their workspace root until version 0.3 is published.
+certificate-based anchor validity or constraints. Certificate validation uses
+the published `certval` 0.2 release candidate with its `std` feature; consumer
+workspaces do not need an OCSP dependency override.
 
 Attestation consumers can explicitly name one exact non-root CA certificate
 whose KeyUsage extension may be absent with
@@ -197,8 +200,8 @@ Dependency updates prefer stable releases and must not add prerelease dependenci
 Brainpool P-256/P-384 use stable releases. P-224, Ed448 and X448 retain the
 prereleases needed for the shared RustCrypto 0.14-era interfaces; their older
 stable releases use incompatible crypto dependency generations. Optional
-certificate validation retains pinned `certval` and `x509-ocsp` Git revisions
-and the compatible CMS 0.3 prerelease because the corresponding stable APIs
+certificate validation uses the published `certval` 0.2 release candidate and
+its compatible CMS 0.3 release candidate because the corresponding stable APIs
 are not published. Review these exceptions when compatible stable releases
 become available. Update shared dependency versions in the consumer lockfiles
 and validate with `--locked`, including known-answer tests and Rust 1.95 checks.
