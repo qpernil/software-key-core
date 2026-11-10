@@ -2,8 +2,9 @@
 //! SP 800-56B Rev. 2 §6.4.2.2. This is partial validation, not proof of correct
 //! key generation, private-key possession, or FIPS module certification.
 
+use num_bigint_dig::BigUint;
 use num_integer::Integer;
-use rsa::{BigUint, rand_core::RngCore};
+use rsa::rand_core::TryRng;
 use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,14 +30,14 @@ pub fn validate_rsa_public_key(
     exponent: &[u8],
     expected_bits: usize,
 ) -> Result<(), RsaPublicValidationError> {
-    validate_with_rng(modulus, exponent, expected_bits, &mut rsa::rand_core::OsRng)
+    validate_with_rng(modulus, exponent, expected_bits, &mut getrandom::SysRng)
 }
 
 fn validate_with_rng(
     modulus: &[u8],
     exponent: &[u8],
     expected_bits: usize,
-    rng: &mut impl RngCore,
+    rng: &mut impl TryRng,
 ) -> Result<(), RsaPublicValidationError> {
     use RsaPublicValidationError::InvalidPublicKey;
     if crate::rsa_private_validation::validation_strength(expected_bits).is_none()
@@ -94,7 +95,7 @@ fn small_factors() -> &'static BigUint {
     })
 }
 
-fn random_base(n: &BigUint, rng: &mut impl RngCore) -> Result<BigUint, RsaPublicValidationError> {
+fn random_base(n: &BigUint, rng: &mut impl TryRng) -> Result<BigUint, RsaPublicValidationError> {
     let mut bytes = vec![0; n.bits().div_ceil(8)];
     let mask = 0xff >> ((8 - n.bits() % 8) % 8);
     let upper = n - 1u8;
@@ -296,17 +297,15 @@ mod tests {
     #[test]
     fn unusable_randomness_fails_closed_after_bounded_sampling() {
         struct ZeroRng;
-        impl RngCore for ZeroRng {
-            fn next_u32(&mut self) -> u32 {
-                0
+        impl TryRng for ZeroRng {
+            type Error = core::convert::Infallible;
+            fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+                Ok(0)
             }
-            fn next_u64(&mut self) -> u64 {
-                0
+            fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+                Ok(0)
             }
-            fn fill_bytes(&mut self, bytes: &mut [u8]) {
-                bytes.fill(0);
-            }
-            fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> Result<(), rsa::rand_core::Error> {
+            fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> Result<(), Self::Error> {
                 bytes.fill(0);
                 Ok(())
             }

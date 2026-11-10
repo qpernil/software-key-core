@@ -79,12 +79,10 @@ fixed-size raw encoding without expanding a verification matrix. Every
 correctly sized FIPS 204 public-key encoding is decodable. Tests compare DER
 against the upstream encoder for all parameter sets and exercise metadata
 operations on a 64 KiB stack. ML-DSA uses upstream
-[RustCrypto/signatures](https://github.com/RustCrypto/signatures) commit
-`a3690c4a0bd861fcf2bde0e38b3609e86c3fe89e`, pinned in the dependency manifest.
-The pin retains the matrix stack fix until a crates.io release includes it and
-passes the 512 KiB stack tests in debug and release builds; then use a normal
-compatible version requirement. With allocation enabled, the ML-DSA
-implementation stores private matrices as `MaybeBox` rows,
+[RustCrypto/signatures](https://github.com/RustCrypto/signatures) release
+0.1.2 from crates.io, including the matrix stack fix. The stack regression
+suite covers all three parameter sets in debug and release builds. With
+allocation enabled, the ML-DSA implementation stores private matrices as `MaybeBox` rows,
 so sampling and cloning avoid a full inline matrix. The public lattice types
 and constructors are unchanged; other vectors and intermediate values still
 use stack space.

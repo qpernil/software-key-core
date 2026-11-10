@@ -34,9 +34,8 @@ use p384::SecretKey as P384SecretKey;
 use p384::ecdsa::SigningKey as P384SigningKey;
 use p521::SecretKey as P521SecretKey;
 use p521::ecdsa::SigningKey as P521SigningKey;
-use rsa::pkcs8::EncodePrivateKey as EncodeRsaPrivateKey;
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
-use rsa::{RsaPrivateKey, RsaPublicKey};
+use rsa::{PrivateKey, PublicKey};
 use signature::hazmat::{PrehashSigner, PrehashVerifier};
 use signature::{Signer, Verifier};
 use std::fmt;
@@ -503,9 +502,11 @@ impl SoftwarePublicKey {
                 | SignatureScheme::RsaPkcs1Sha512),
                 Self::Rsa { modulus, exponent },
             ) => {
-                let key = RsaPublicKey::new(
-                    rsa::BigUint::from_bytes_be(modulus),
-                    rsa::BigUint::from_bytes_be(exponent),
+                let key = PublicKey::new_with_size_limits(
+                    rsa::BoxedUint::from_be_slice_vartime(modulus),
+                    rsa::BoxedUint::from_be_slice_vartime(exponent),
+                    crate::rsa_private_validation::MIN_RSA_BITS
+                        ..=crate::rsa_private_validation::MAX_RSA_BITS,
                 )
                 .map_err(|_| SoftwareSigningError::InvalidPublicKey)?;
                 verify_rsa_message(algorithm, &key, message, signature)
@@ -624,10 +625,11 @@ impl SoftwarePublicKey {
     }
 }
 
-fn rsa_public_key(modulus: &[u8], exponent: &[u8]) -> Result<RsaPublicKey, SoftwareSigningError> {
-    RsaPublicKey::new(
-        rsa::BigUint::from_bytes_be(modulus),
-        rsa::BigUint::from_bytes_be(exponent),
+fn rsa_public_key(modulus: &[u8], exponent: &[u8]) -> Result<PublicKey, SoftwareSigningError> {
+    PublicKey::new_with_size_limits(
+        rsa::BoxedUint::from_be_slice_vartime(modulus),
+        rsa::BoxedUint::from_be_slice_vartime(exponent),
+        crate::rsa_private_validation::MIN_RSA_BITS..=crate::rsa_private_validation::MAX_RSA_BITS,
     )
     .map_err(|_| SoftwareSigningError::InvalidPublicKey)
 }
@@ -646,7 +648,7 @@ fn rsa_profile(algorithm: SignatureScheme) -> Option<(RsaHashAlgorithm, bool)> {
 
 fn verify_rsa_message(
     algorithm: SignatureScheme,
-    key: &RsaPublicKey,
+    key: &PublicKey,
     message: &[u8],
     signature: &[u8],
 ) -> Result<(), SoftwareSigningError> {
@@ -656,7 +658,7 @@ fn verify_rsa_message(
 
 fn verify_rsa_prehash(
     algorithm: SignatureScheme,
-    key: &RsaPublicKey,
+    key: &PublicKey,
     prehash: &[u8],
     signature: &[u8],
     pss_salt_length: Option<usize>,
@@ -1226,7 +1228,7 @@ impl SoftwareSigningKey {
             Self::Ec(key) => KeyKind::Ec(key.curve()),
             Self::Edwards(key) => KeyKind::Edwards(key.curve()),
             Self::Rsa(key) => KeyKind::Rsa {
-                modulus_bits: key.n().bits(),
+                modulus_bits: key.n().bit_width() as usize,
             },
             Self::MlDsa(key) => KeyKind::MlDsa(key.parameter_set()),
         }
@@ -1261,15 +1263,15 @@ impl SoftwareSigningKey {
         let dq = key.dq().ok_or(SoftwareSigningError::InvalidPrivateKey)?;
         let qinv = key
             .qinv()
-            .and_then(|value| value.to_biguint())
+            .map(|value| Zeroizing::new(value.retrieve()))
             .ok_or(SoftwareSigningError::InvalidPrivateKey)?;
         Ok([
-            Zeroizing::new(key.d().to_bytes_be()),
-            Zeroizing::new(p.to_bytes_be()),
-            Zeroizing::new(q.to_bytes_be()),
-            Zeroizing::new(dp.to_bytes_be()),
-            Zeroizing::new(dq.to_bytes_be()),
-            Zeroizing::new(qinv.to_bytes_be()),
+            Zeroizing::new(key.d().to_be_bytes_trimmed_vartime().into_vec()),
+            Zeroizing::new(p.to_be_bytes_trimmed_vartime().into_vec()),
+            Zeroizing::new(q.to_be_bytes_trimmed_vartime().into_vec()),
+            Zeroizing::new(dp.to_be_bytes_trimmed_vartime().into_vec()),
+            Zeroizing::new(dq.to_be_bytes_trimmed_vartime().into_vec()),
+            Zeroizing::new(qinv.to_be_bytes_trimmed_vartime().into_vec()),
         ])
     }
 
@@ -1415,9 +1417,9 @@ impl SoftwareSigningKey {
         exponent: &[u8],
     ) -> Result<Self, SoftwareSigningError> {
         crate::rsa_keys::RsaKey::import_primes(
-            rsa::BigUint::from_bytes_be(p),
-            rsa::BigUint::from_bytes_be(q),
-            rsa::BigUint::from_bytes_be(exponent),
+            num_bigint_dig::BigUint::from_bytes_be(p),
+            num_bigint_dig::BigUint::from_bytes_be(q),
+            num_bigint_dig::BigUint::from_bytes_be(exponent),
         )
         .map(Self::Rsa)
         .map_err(rsa_key_error)
@@ -1430,9 +1432,9 @@ impl SoftwareSigningKey {
         exponent: &[u8],
     ) -> Result<Self, SoftwareSigningError> {
         crate::rsa_keys::RsaKey::restore_primes(
-            rsa::BigUint::from_bytes_be(p),
-            rsa::BigUint::from_bytes_be(q),
-            rsa::BigUint::from_bytes_be(exponent),
+            num_bigint_dig::BigUint::from_bytes_be(p),
+            num_bigint_dig::BigUint::from_bytes_be(q),
+            num_bigint_dig::BigUint::from_bytes_be(exponent),
         )
         .map(Self::Rsa)
         .map_err(rsa_key_error)
@@ -1440,10 +1442,10 @@ impl SoftwareSigningKey {
 
     /// Import PKCS #11 RSA components. Optional factor recovery is owned here.
     pub fn from_rsa_components(
-        n: rsa::BigUint,
-        e: rsa::BigUint,
-        d: rsa::BigUint,
-        primes: Vec<rsa::BigUint>,
+        n: num_bigint_dig::BigUint,
+        e: num_bigint_dig::BigUint,
+        d: num_bigint_dig::BigUint,
+        primes: Vec<num_bigint_dig::BigUint>,
     ) -> Result<Self, SoftwareSigningError> {
         crate::rsa_keys::RsaKey::import_components(n, e, d, primes)
             .map(Self::Rsa)
@@ -1560,8 +1562,8 @@ impl SoftwareSigningKey {
                 public_key: key.public_key(),
             },
             Self::Rsa(key) => SoftwarePublicKey::Rsa {
-                modulus: key.n().to_bytes_be(),
-                exponent: key.e().to_bytes_be(),
+                modulus: key.n().to_be_bytes_trimmed_vartime().into_vec(),
+                exponent: key.e().to_be_bytes_trimmed_vartime().into_vec(),
             },
             Self::MlDsa(key) => SoftwarePublicKey::MlDsa {
                 parameter_set: key.parameter_set(),
@@ -1732,21 +1734,21 @@ impl SoftwareSigningKey {
         let dq = key.dq().ok_or(SoftwareSigningError::InvalidPrivateKey)?;
         let qinv = key
             .qinv()
-            .and_then(|value| value.to_biguint())
+            .map(|value| Zeroizing::new(value.retrieve()))
             .ok_or(SoftwareSigningError::InvalidPrivateKey)?;
         Ok([
-            Zeroizing::new(p.to_bytes_be()),
-            Zeroizing::new(q.to_bytes_be()),
-            Zeroizing::new(dp.to_bytes_be()),
-            Zeroizing::new(dq.to_bytes_be()),
-            Zeroizing::new(qinv.to_bytes_be()),
+            Zeroizing::new(p.to_be_bytes_trimmed_vartime().into_vec()),
+            Zeroizing::new(q.to_be_bytes_trimmed_vartime().into_vec()),
+            Zeroizing::new(dp.to_be_bytes_trimmed_vartime().into_vec()),
+            Zeroizing::new(dq.to_be_bytes_trimmed_vartime().into_vec()),
+            Zeroizing::new(qinv.to_be_bytes_trimmed_vartime().into_vec()),
         ])
     }
 }
 
 fn rsa_sign_message(
     algorithm: SignatureScheme,
-    key: &RsaPrivateKey,
+    key: &PrivateKey,
     message: &[u8],
 ) -> Result<Vec<u8>, SoftwareSigningError> {
     let (hash, _) = rsa_profile(algorithm).ok_or(SoftwareSigningError::AlgorithmMismatch)?;
@@ -1755,7 +1757,7 @@ fn rsa_sign_message(
 
 fn rsa_sign_prehash(
     algorithm: SignatureScheme,
-    key: &RsaPrivateKey,
+    key: &PrivateKey,
     prehash: &[u8],
     pss_salt_length: Option<usize>,
 ) -> Result<Vec<u8>, SoftwareSigningError> {
@@ -1957,9 +1959,11 @@ mod tests {
         hash.update(&signature[..32]);
         hash.update(public);
         hash.update(message);
-        let order = (rsa::BigUint::from(1u8) << 252)
-            + rsa::BigUint::parse_bytes(b"27742317777372353535851937790883648493", 10).unwrap();
-        let scalar = (rsa::BigUint::from_bytes_le(&hash.finalize()) % order).to_bytes_le();
+        let order = (num_bigint_dig::BigUint::from(1u8) << 252)
+            + num_bigint_dig::BigUint::parse_bytes(b"27742317777372353535851937790883648493", 10)
+                .unwrap();
+        let scalar =
+            (num_bigint_dig::BigUint::from_bytes_le(&hash.finalize()) % order).to_bytes_le();
         signature[32..32 + scalar.len()].copy_from_slice(&scalar);
         let parsed = ed25519_dalek::VerifyingKey::from_bytes(&public).unwrap();
         let sig = ed25519_dalek::Signature::from_bytes(&signature);
@@ -1979,9 +1983,9 @@ mod tests {
     fn ed448_rejects_identity_torsion_and_mixed_order_public_keys() {
         let mut identity = vec![0; 57];
         identity[0] = 1;
-        let order_two = ((rsa::BigUint::from(1u8) << 448)
-            - (rsa::BigUint::from(1u8) << 224)
-            - rsa::BigUint::from(2u8))
+        let order_two = ((num_bigint_dig::BigUint::from(1u8) << 448)
+            - (num_bigint_dig::BigUint::from(1u8) << 224)
+            - num_bigint_dig::BigUint::from(2u8))
         .to_bytes_le();
         let mut order_two_bytes = [0; 57];
         order_two_bytes[..order_two.len()].copy_from_slice(&order_two);
@@ -2330,8 +2334,8 @@ mod tests {
             unreachable!();
         };
         let rebuilt = SoftwareSigningKey::from_rsa_primes(
-            &key.primes()[0].to_bytes_be(),
-            &key.primes()[1].to_bytes_be(),
+            &key.primes()[0].to_be_bytes_trimmed_vartime(),
+            &key.primes()[1].to_be_bytes_trimmed_vartime(),
             &[1, 0, 1],
         )
         .unwrap();

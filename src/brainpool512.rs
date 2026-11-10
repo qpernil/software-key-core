@@ -46,6 +46,10 @@ impl core::fmt::Display for BrainpoolP512VerifyError {
 
 impl std::error::Error for BrainpoolP512VerifyError {}
 
+#[expect(
+    deprecated,
+    reason = "primefield 0.14 monty_field_params calls crypto-bigint bits; remove when the macro uses bit_width"
+)]
 mod field {
     use super::U512;
     use elliptic_curve::{
@@ -78,6 +82,10 @@ mod field {
     impl elliptic_curve::ops::BatchInvert for FieldElement {}
 }
 
+#[expect(
+    deprecated,
+    reason = "primefield 0.14 monty_field_params calls crypto-bigint bits; remove when the macro uses bit_width"
+)]
 mod scalar {
     use super::{BrainpoolP512r1, ORDER, ORDER_HEX, U512, U1024};
     use elliptic_curve::{
@@ -200,8 +208,8 @@ pub fn verify_prehash(
     digest: &[u8],
     signature: &[u8],
 ) -> Result<(), BrainpoolP512VerifyError> {
+    use num_bigint_dig::BigUint;
     use num_bigint_dig::traits::ModInverse;
-    use rsa::BigUint;
 
     const COORDINATE_LENGTH: usize = 64;
     if public_key.len() != 1 + 2 * COORDINATE_LENGTH
@@ -278,16 +286,20 @@ pub fn verify_prehash(
 
 #[derive(Clone)]
 struct PublicPoint {
-    x: rsa::BigUint,
-    y: rsa::BigUint,
-    z: rsa::BigUint,
+    x: num_bigint_dig::BigUint,
+    y: num_bigint_dig::BigUint,
+    z: num_bigint_dig::BigUint,
 }
 
-fn biguint(value: &str) -> Result<rsa::BigUint, BrainpoolP512VerifyError> {
-    rsa::BigUint::parse_bytes(value.as_bytes(), 16).ok_or(BrainpoolP512VerifyError)
+fn biguint(value: &str) -> Result<num_bigint_dig::BigUint, BrainpoolP512VerifyError> {
+    num_bigint_dig::BigUint::parse_bytes(value.as_bytes(), 16).ok_or(BrainpoolP512VerifyError)
 }
 
-fn mod_sub(left: &rsa::BigUint, right: &rsa::BigUint, modulus: &rsa::BigUint) -> rsa::BigUint {
+fn mod_sub(
+    left: &num_bigint_dig::BigUint,
+    right: &num_bigint_dig::BigUint,
+    modulus: &num_bigint_dig::BigUint,
+) -> num_bigint_dig::BigUint {
     if left >= right {
         (left - right) % modulus
     } else {
@@ -295,12 +307,16 @@ fn mod_sub(left: &rsa::BigUint, right: &rsa::BigUint, modulus: &rsa::BigUint) ->
     }
 }
 
-fn double(point: &PublicPoint, p: &rsa::BigUint, a: &rsa::BigUint) -> PublicPoint {
-    let zero = rsa::BigUint::from(0_u8);
+fn double(
+    point: &PublicPoint,
+    p: &num_bigint_dig::BigUint,
+    a: &num_bigint_dig::BigUint,
+) -> PublicPoint {
+    let zero = num_bigint_dig::BigUint::from(0_u8);
     if point.z == zero || point.y == zero {
         return PublicPoint {
             x: zero.clone(),
-            y: rsa::BigUint::from(1_u8),
+            y: num_bigint_dig::BigUint::from(1_u8),
             z: zero,
         };
     }
@@ -311,17 +327,26 @@ fn double(point: &PublicPoint, p: &rsa::BigUint, a: &rsa::BigUint) -> PublicPoin
     let x_plus_yy = (&point.x + &yy) % p;
     let mut s = mod_sub(&((&x_plus_yy * &x_plus_yy) % p), &xx, p);
     s = mod_sub(&s, &yyyy, p);
-    s = (&s * rsa::BigUint::from(2_u8)) % p;
-    let m = ((&xx * rsa::BigUint::from(3_u8)) + (a * &zz * &zz)) % p;
-    let x = mod_sub(&((&m * &m) % p), &((&s * rsa::BigUint::from(2_u8)) % p), p);
+    s = (&s * num_bigint_dig::BigUint::from(2_u8)) % p;
+    let m = ((&xx * num_bigint_dig::BigUint::from(3_u8)) + (a * &zz * &zz)) % p;
+    let x = mod_sub(
+        &((&m * &m) % p),
+        &((&s * num_bigint_dig::BigUint::from(2_u8)) % p),
+        p,
+    );
     let mut y = (&m * mod_sub(&s, &x, p)) % p;
-    y = mod_sub(&y, &((&yyyy * rsa::BigUint::from(8_u8)) % p), p);
-    let z = ((&point.y * &point.z) * rsa::BigUint::from(2_u8)) % p;
+    y = mod_sub(&y, &((&yyyy * num_bigint_dig::BigUint::from(8_u8)) % p), p);
+    let z = ((&point.y * &point.z) * num_bigint_dig::BigUint::from(2_u8)) % p;
     PublicPoint { x, y, z }
 }
 
-fn add(left: &PublicPoint, right: &PublicPoint, p: &rsa::BigUint, a: &rsa::BigUint) -> PublicPoint {
-    let zero = rsa::BigUint::from(0_u8);
+fn add(
+    left: &PublicPoint,
+    right: &PublicPoint,
+    p: &num_bigint_dig::BigUint,
+    a: &num_bigint_dig::BigUint,
+) -> PublicPoint {
+    let zero = num_bigint_dig::BigUint::from(0_u8);
     if left.z == zero {
         return right.clone();
     }
@@ -340,21 +365,25 @@ fn add(left: &PublicPoint, right: &PublicPoint, p: &rsa::BigUint, a: &rsa::BigUi
         } else {
             PublicPoint {
                 x: zero.clone(),
-                y: rsa::BigUint::from(1_u8),
+                y: num_bigint_dig::BigUint::from(1_u8),
                 z: zero,
             }
         };
     }
     let h = mod_sub(&u2, &u1, p);
-    let two_h = (&h * rsa::BigUint::from(2_u8)) % p;
+    let two_h = (&h * num_bigint_dig::BigUint::from(2_u8)) % p;
     let i = (&two_h * &two_h) % p;
     let j = (&h * &i) % p;
-    let r = (mod_sub(&s2, &s1, p) * rsa::BigUint::from(2_u8)) % p;
+    let r = (mod_sub(&s2, &s1, p) * num_bigint_dig::BigUint::from(2_u8)) % p;
     let v = (&u1 * &i) % p;
     let mut x = mod_sub(&((&r * &r) % p), &j, p);
-    x = mod_sub(&x, &((&v * rsa::BigUint::from(2_u8)) % p), p);
+    x = mod_sub(&x, &((&v * num_bigint_dig::BigUint::from(2_u8)) % p), p);
     let mut y = (&r * mod_sub(&v, &x, p)) % p;
-    y = mod_sub(&y, &(((&s1 * &j) * rsa::BigUint::from(2_u8)) % p), p);
+    y = mod_sub(
+        &y,
+        &(((&s1 * &j) * num_bigint_dig::BigUint::from(2_u8)) % p),
+        p,
+    );
     let z_sum = (&left.z + &right.z) % p;
     let mut z = mod_sub(&((&z_sum * &z_sum) % p), &z1z1, p);
     z = mod_sub(&z, &z2z2, p);
@@ -363,21 +392,21 @@ fn add(left: &PublicPoint, right: &PublicPoint, p: &rsa::BigUint, a: &rsa::BigUi
 }
 
 fn multiply_sum(
-    left_scalar: &rsa::BigUint,
+    left_scalar: &num_bigint_dig::BigUint,
     left: &PublicPoint,
-    right_scalar: &rsa::BigUint,
+    right_scalar: &num_bigint_dig::BigUint,
     right: &PublicPoint,
-    p: &rsa::BigUint,
-    a: &rsa::BigUint,
+    p: &num_bigint_dig::BigUint,
+    a: &num_bigint_dig::BigUint,
 ) -> PublicPoint {
     let left_bytes = left_scalar.to_bytes_be();
     let right_bytes = right_scalar.to_bytes_be();
     let length = left_bytes.len().max(right_bytes.len());
     let combined = add(left, right, p, a);
     let mut result = PublicPoint {
-        x: rsa::BigUint::from(0_u8),
-        y: rsa::BigUint::from(1_u8),
-        z: rsa::BigUint::from(0_u8),
+        x: num_bigint_dig::BigUint::from(0_u8),
+        y: num_bigint_dig::BigUint::from(1_u8),
+        z: num_bigint_dig::BigUint::from(0_u8),
     };
     let left_offset = length - left_bytes.len();
     let right_offset = length - right_bytes.len();

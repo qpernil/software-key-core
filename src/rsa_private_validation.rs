@@ -5,10 +5,11 @@
 //! primality. The importer must also have assurance of trusted key generation
 //! (§6.4.1.1); validation cannot establish provenance or generation entropy.
 
+use num_bigint_dig::BigUint;
 use num_integer::Integer;
 use rsa::{
-    BigUint, RsaPrivateKey,
-    rand_core::RngCore,
+    PrivateKey,
+    rand_core::TryRng,
     traits::{PrivateKeyParts, PublicKeyParts},
 };
 use zeroize::{Zeroize, Zeroizing};
@@ -59,31 +60,34 @@ pub fn check_nist_acceptance(
 /// pair-wise consistency test. This function performs both at import time.
 /// The caller retains authorization, persistence and trusted-generation policy.
 pub fn validate_rsa_private_key(
-    key: &RsaPrivateKey,
+    key: &PrivateKey,
     bits: usize,
 ) -> Result<(), RsaPrivateValidationError> {
-    validate_with_rng(key, bits, &mut rsa::rand_core::OsRng)
+    validate_with_rng(key, bits, &mut getrandom::SysRng)
 }
 
 fn validate_with_rng(
-    key: &RsaPrivateKey,
+    key: &PrivateKey,
     bits: usize,
-    rng: &mut impl RngCore,
+    rng: &mut impl TryRng,
 ) -> Result<(), RsaPrivateValidationError> {
     use RsaPrivateValidationError::InvalidPrivateKey;
     // §6.4.1.2.2 / §6.4.1.4.2: validate the prime-factor representation.
     // The caller separately enforces the intended size and exponent policy.
+    let n = crate::rsa_keys::unsigned(key.n());
+    let e = crate::rsa_keys::unsigned(key.e());
+    let d = &*Zeroizing::new(crate::rsa_keys::unsigned(key.d()));
     let strength = validation_strength(bits).ok_or(InvalidPrivateKey)?;
-    if key.n().bits() != bits
-        || key.e() < &BigUint::from(3u8)
-        || key.e().is_even()
-        || key.e().bits() > 256
+    if n.bits() != bits
+        || e < BigUint::from(3u8)
+        || e.is_even()
+        || e.bits() > 256
         || key.primes().len() != 2
     {
         return Err(InvalidPrivateKey);
     }
-    let p = &key.primes()[0];
-    let q = &key.primes()[1];
+    let p = &*Zeroizing::new(crate::rsa_keys::unsigned(&key.primes()[0]));
+    let q = &*Zeroizing::new(crate::rsa_keys::unsigned(&key.primes()[1]));
     let one = BigUint::from(1u8);
     // §6.4.1.2.1 step 5(a–c). Even moduli have equal factor widths.
     // For legacy odd-width moduli, adapt to floor/ceil half-width factors;
@@ -96,7 +100,7 @@ fn validate_with_rng(
         || q.is_even()
         || *Zeroizing::new(p * p) < (&one << (2 * p_bits - 1))
         || *Zeroizing::new(q * q) < (&one << (2 * q_bits - 1))
-        || *Zeroizing::new(p * q) != *key.n()
+        || *Zeroizing::new(p * q) != n
     {
         return Err(InvalidPrivateKey);
     }
@@ -106,17 +110,14 @@ fn validate_with_rng(
     }
     let pm1 = Zeroizing::new(p - 1u8);
     let qm1 = Zeroizing::new(q - 1u8);
-    if *Zeroizing::new(pm1.gcd(key.e())) != one || *Zeroizing::new(qm1.gcd(key.e())) != one {
+    if *Zeroizing::new(pm1.gcd(&e)) != one || *Zeroizing::new(qm1.gcd(&e)) != one {
         return Err(InvalidPrivateKey);
     }
     // Step 6: d is the canonical inverse modulo lcm(p-1,q-1), with a
     // lower bound. Algebraically equivalent, larger d values are rejected.
     let lambda = Zeroizing::new(pm1.lcm(&qm1));
-    let de = Zeroizing::new(key.d() * key.e());
-    if key.d() <= &(&one << (bits / 2))
-        || key.d() >= &*lambda
-        || *Zeroizing::new(&*de % &*lambda) != one
-    {
+    let de = Zeroizing::new(d * &e);
+    if d <= &(&one << (bits / 2)) || d >= &*lambda || *Zeroizing::new(&*de % &*lambda) != one {
         return Err(InvalidPrivateKey);
     }
     // Step 5(f–g): FIPS 186-5 §B.3.1 Miller–Rabin, independent uniform
@@ -131,12 +132,20 @@ fn validate_with_rng(
     // §6.4.1.1 step 2: m = (m^e)^d mod n, 1 < m < n-1.
     // Use the existing blinded private operation, including its fault check.
     let m = BigUint::from(2u8);
-    let ciphertext = m.modpow(key.e(), key.n());
-    let recovered = Zeroizing::new(
-        rsa::hazmat::rsa_decrypt_and_check(key, Some(&mut rsa::rand_core::OsRng), &ciphertext)
+    let ciphertext = rsa::hazmat::rsa_encrypt(
+        key,
+        &rsa::BoxedUint::from_be_slice(&[2], key.n().bits_precision())
             .map_err(|_| InvalidPrivateKey)?,
+    )
+    .map_err(|_| InvalidPrivateKey)?;
+    let recovered = Zeroizing::new(
+        rsa::hazmat::rsa_decrypt_and_check(key, Some(&mut getrandom::SysRng), &ciphertext)
+            .map_err(|error| match error {
+                rsa::Error::Rng => RsaPrivateValidationError::RandomnessUnavailable,
+                _ => InvalidPrivateKey,
+            })?,
     );
-    if *recovered != m {
+    if crate::rsa_keys::unsigned(&recovered) != m {
         return Err(InvalidPrivateKey);
     }
     Ok(())
@@ -145,7 +154,7 @@ fn validate_with_rng(
 fn probable_prime(
     n: &BigUint,
     rounds: usize,
-    rng: &mut impl RngCore,
+    rng: &mut impl TryRng,
 ) -> Result<bool, RsaPrivateValidationError> {
     let one = BigUint::from(1u8);
     if n <= &BigUint::from(3u8) {
@@ -200,13 +209,13 @@ fn probable_prime(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsa::rand_core::{CryptoRng, Error};
+    use rsa::rand_core::TryCryptoRng;
 
-    fn key(bits: usize) -> RsaPrivateKey {
-        let generated = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, bits).unwrap();
-        let mut key = RsaPrivateKey::from_p_q(
-            generated.primes()[0].clone(),
-            generated.primes()[1].clone(),
+    fn key(bits: usize) -> PrivateKey {
+        let generated = PrivateKey::new(&mut getrandom::SysRng, bits).unwrap();
+        let mut key = PrivateKey::from_p_q(
+            generated.primes()[0].as_ref().clone(),
+            generated.primes()[1].as_ref().clone(),
             generated.e().clone(),
         )
         .unwrap();
@@ -224,12 +233,13 @@ mod tests {
                 Err(RsaPrivateValidationError::InvalidPrivateKey)
             );
         }
-        let lambda = (key.primes()[0].clone() - 1u8).lcm(&(key.primes()[1].clone() - 1u8));
-        let equivalent = RsaPrivateKey::from_components(
-            key.n().clone(),
+        let lambda = (crate::rsa_keys::unsigned(&key.primes()[0]) - 1u8)
+            .lcm(&(crate::rsa_keys::unsigned(&key.primes()[1]) - 1u8));
+        let equivalent = PrivateKey::from_components(
+            key.n().as_ref().clone(),
             key.e().clone(),
-            key.d() + lambda,
-            key.primes().to_vec(),
+            crate::rsa_keys::boxed(crate::rsa_keys::unsigned(key.d()) + lambda),
+            key.primes().iter().map(|p| p.as_ref().clone()).collect(),
         )
         .unwrap();
         // This key works algebraically, but violates the specified range for d.
@@ -246,9 +256,12 @@ mod tests {
         // 2^1024-1 has small factors, but is large, odd and well separated
         // from the other factor. The ordinary RSA constructor accepts it.
         let composite = (BigUint::from(1u8) << 1024) - 1u8;
-        let mut bad =
-            RsaPrivateKey::from_p_q(composite, valid.primes()[1].clone(), valid.e().clone())
-                .unwrap();
+        let mut bad = PrivateKey::from_p_q(
+            crate::rsa_keys::boxed(composite),
+            valid.primes()[1].as_ref().clone(),
+            valid.e().clone(),
+        )
+        .unwrap();
         bad.precompute().unwrap();
         bad.validate().unwrap();
         assert_eq!(
@@ -260,30 +273,28 @@ mod tests {
     #[test]
     fn composite_factors_and_prime_powers_are_rejected() {
         for n in [9u32, 15, 25, 341, 561, 1105, 1729, 3215031751] {
-            assert!(!probable_prime(&BigUint::from(n), 57, &mut rsa::rand_core::OsRng).unwrap());
+            assert!(!probable_prime(&BigUint::from(n), 57, &mut getrandom::SysRng).unwrap());
         }
         for n in [3u32, 5, 751, 65537] {
-            assert!(probable_prime(&BigUint::from(n), 57, &mut rsa::rand_core::OsRng).unwrap());
+            assert!(probable_prime(&BigUint::from(n), 57, &mut getrandom::SysRng).unwrap());
         }
     }
 
     struct ZeroRng;
-    impl RngCore for ZeroRng {
-        fn next_u32(&mut self) -> u32 {
-            0
+    impl TryRng for ZeroRng {
+        type Error = core::convert::Infallible;
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(0)
         }
-        fn next_u64(&mut self) -> u64 {
-            0
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            Ok(0)
         }
-        fn fill_bytes(&mut self, bytes: &mut [u8]) {
-            bytes.fill(0);
-        }
-        fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> Result<(), Error> {
+        fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> Result<(), Self::Error> {
             bytes.fill(0);
             Ok(())
         }
     }
-    impl CryptoRng for ZeroRng {}
+    impl TryCryptoRng for ZeroRng {}
 
     #[test]
     fn unusable_randomness_fails_closed() {
@@ -305,8 +316,8 @@ mod tests {
                 println!("private RSA-{bits} validation: {:?}", start.elapsed());
                 let start = std::time::Instant::now();
                 crate::rsa_public_validation::validate_rsa_public_key(
-                    &key.n().to_bytes_be(),
-                    &key.e().to_bytes_be(),
+                    &key.n().to_be_bytes_trimmed_vartime(),
+                    &key.e().to_be_bytes_trimmed_vartime(),
                     bits,
                 )
                 .unwrap();

@@ -35,12 +35,10 @@ ghash = "0.6.0"
 hkdf = "0.13.0"
 hmac = "0.13.0"
 k256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "std"] }
-# Temporary pin for the matrix stack fix; switch to a crates.io release
-# once it includes the fix and passes the 512 KiB stack tests.
-ml-dsa = { git = "https://github.com/RustCrypto/signatures.git", rev = "a3690c4a0bd861fcf2bde0e38b3609e86c3fe89e", default-features = false, features = ["alloc", "getrandom", "pkcs8", "zeroize"] }
+ml-dsa = { version = "0.1.2", default-features = false, features = ["alloc", "getrandom", "pkcs8", "zeroize"] }
 ml-kem = { version = "0.3.3", features = ["pkcs8", "zeroize"] }
 module-lattice = { version = "0.2.3", features = ["zeroize"] }
-num-bigint-dig = "0.8.6"
+num-bigint-dig = { version = "0.8.6", features = ["zeroize"] }
 num-integer = "0.1.47"
 pbkdf2 = { version = "0.13.0", features = ["hmac"] }
 p256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "precomputed-tables", "std"] }
@@ -51,7 +49,7 @@ ecdsa = "0.17.0"
 elliptic-curve = { version = "0.14.3", features = ["ecdh", "pkcs8"] }
 primefield = "0.14.0"
 primeorder = "0.14.0"
-rsa = { version = "0.9.10", default-features = false, features = ["hazmat", "std", "u64_digit"] }
+rsa = { version = "0.10.0", default-features = false, features = ["encoding", "getrandom", "hazmat", "pkcs1v15", "std"] }
 sha1 = "0.11.0"
 sha2 = "0.11.0"
 sha3 = "0.11.0"
@@ -65,6 +63,6 @@ zeroize = "1.9.0"
 libc = { version = "0.2.191", optional = true }
 
 [dev-dependencies]
-rand = "0.8.8"
+rand = "0.10.3"
 serde_json = "1.0.149"
 flate2 = "1.1.9"

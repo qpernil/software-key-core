@@ -389,9 +389,11 @@ fn kat_wycheproof_rsa_pkcs1_and_pss() {
         for (name, fixture) in fixtures {
             let data = load(fixture);
             for group in groups(&data) {
-                let key = rsa::RsaPublicKey::new(
-                    rsa::BigUint::from_bytes_be(&hex(&group["publicKey"]["modulus"])),
-                    rsa::BigUint::from_bytes_be(&hex(&group["publicKey"]["publicExponent"])),
+                let key = rsa::PublicKey::new(
+                    rsa::BoxedUint::from_be_slice_vartime(&hex(&group["publicKey"]["modulus"])),
+                    rsa::BoxedUint::from_be_slice_vartime(&hex(
+                        &group["publicKey"]["publicExponent"],
+                    )),
                 )
                 .unwrap();
                 let hash = hash_algorithm(group["sha"].as_str().unwrap());
@@ -1009,8 +1011,7 @@ fn kat_wycheproof_rsa_oaep_and_pkcs1_decryption() {
         for (name, fixture) in fixtures {
             let data = load(fixture);
             for group in groups(&data) {
-                let key =
-                    rsa::RsaPrivateKey::from_pkcs8_der(&hex(&group["privateKeyPkcs8"])).unwrap();
+                let key = rsa::PrivateKey::from_pkcs8_der(&hex(&group["privateKeyPkcs8"])).unwrap();
                 for test in cases(group) {
                     let ciphertext = hex(&test["ct"]);
                     let result = if oaep {

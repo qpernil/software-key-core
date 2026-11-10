@@ -4,7 +4,7 @@
 //! operations, PKCS #1 v1.5 signature padding and DigestInfo values, and
 //! RSASSA-PSS encoding with independent message and MGF1 hash algorithms.
 
-use rsa::{BigUint, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey, traits::PublicKeyParts};
+use rsa::{BoxedUint, PrivateKey, PublicKey, traits::PublicKeyParts};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, ConstantTimeGreater};
 
 pub use crate::digest::HashAlgorithm as RsaHashAlgorithm;
@@ -86,38 +86,68 @@ fn left_pad(value: Vec<u8>, length: usize) -> Result<Vec<u8>, RsaConstructionErr
     Ok(output)
 }
 
-fn private_operation(key: &RsaPrivateKey, encoded: &[u8]) -> Result<Vec<u8>, RsaConstructionError> {
+// Preserve the modulus width without inspecting the result's leading zeros.
+// Raw private-operation results can be secret; wipe both numeric and byte forms.
+fn primitive_result(value: BoxedUint, size: usize) -> Result<Vec<u8>, RsaConstructionError> {
+    let value = zeroize::Zeroizing::new(value);
+    let encoded = zeroize::Zeroizing::new(value.to_be_bytes());
+    let start = encoded
+        .len()
+        .checked_sub(size)
+        .ok_or(RsaConstructionError::OperationFailed)?;
+    Ok(encoded[start..].to_vec())
+}
+
+fn private_operation(key: &PrivateKey, encoded: &[u8]) -> Result<Vec<u8>, RsaConstructionError> {
     if encoded.len() > key.size() {
         return Err(RsaConstructionError::InputTooLong);
     }
-    let value = BigUint::from_bytes_be(encoded);
-    if &value >= key.n() {
+    let value = BoxedUint::from_be_slice(encoded, key.n().bits_precision())
+        .map_err(|_| RsaConstructionError::InputOutOfRange)?;
+    if value >= *key.n().as_ref() {
         return Err(RsaConstructionError::InputOutOfRange);
     }
-    let value = rsa::hazmat::rsa_decrypt_and_check(key, Some(&mut rsa::rand_core::OsRng), &value)
-        .map_err(|_| RsaConstructionError::OperationFailed)?;
-    left_pad(value.to_bytes_be(), key.size())
+    let value = rsa::hazmat::rsa_decrypt_and_check(key, Some(&mut getrandom::SysRng), &value)
+        .map_err(|error| match error {
+            rsa::Error::Rng => RsaConstructionError::RandomnessUnavailable,
+            _ => RsaConstructionError::OperationFailed,
+        })?;
+    primitive_result(value, key.size())
 }
 
-fn public_operation(key: &RsaPublicKey, signature: &[u8]) -> Result<Vec<u8>, RsaConstructionError> {
+fn public_operation(key: &PublicKey, signature: &[u8]) -> Result<Vec<u8>, RsaConstructionError> {
     if signature.len() != key.size() {
         return Err(RsaConstructionError::InvalidSignature);
     }
-    let value = BigUint::from_bytes_be(signature);
-    if &value >= key.n() {
+    let value = BoxedUint::from_be_slice(signature, key.n().bits_precision())
+        .map_err(|_| RsaConstructionError::InvalidSignature)?;
+    if value >= *key.n().as_ref() {
         return Err(RsaConstructionError::InvalidSignature);
     }
     let value = rsa::hazmat::rsa_encrypt(key, &value)
         .map_err(|_| RsaConstructionError::InvalidSignature)?;
-    left_pad(value.to_bytes_be(), key.size())
+    primitive_result(value, key.size())
 }
 
-pub fn rsa_sign_raw(key: &RsaPrivateKey, input: &[u8]) -> Result<Vec<u8>, RsaConstructionError> {
+/// Apply the public RSA primitive to an unsigned big-endian integer.
+/// Short inputs are left-padded; signatures still require exact width in verification.
+pub fn rsa_public_raw(key: &PublicKey, input: &[u8]) -> Result<Vec<u8>, RsaConstructionError> {
+    if input.len() > key.size() {
+        return Err(RsaConstructionError::InputTooLong);
+    }
+    let encoded = left_pad(input.to_vec(), key.size())?;
+    public_operation(key, &encoded).map_err(|error| match error {
+        RsaConstructionError::InvalidSignature => RsaConstructionError::InputOutOfRange,
+        other => other,
+    })
+}
+
+pub fn rsa_sign_raw(key: &PrivateKey, input: &[u8]) -> Result<Vec<u8>, RsaConstructionError> {
     private_operation(key, input)
 }
 
 pub fn rsa_verify_raw(
-    key: &RsaPublicKey,
+    key: &PublicKey,
     input: &[u8],
     signature: &[u8],
 ) -> Result<(), RsaConstructionError> {
@@ -148,14 +178,14 @@ pub fn pkcs1v15_encoded_payload(
 }
 
 pub fn rsa_sign_pkcs1v15_payload(
-    key: &RsaPrivateKey,
+    key: &PrivateKey,
     payload: &[u8],
 ) -> Result<Vec<u8>, RsaConstructionError> {
     private_operation(key, &pkcs1v15_encoded_payload(key.size(), payload)?)
 }
 
 pub fn rsa_verify_pkcs1v15_payload(
-    key: &RsaPublicKey,
+    key: &PublicKey,
     payload: &[u8],
     signature: &[u8],
 ) -> Result<(), RsaConstructionError> {
@@ -177,7 +207,7 @@ pub fn digest_info(hash: RsaHashAlgorithm, digest: &[u8]) -> Result<Vec<u8>, Rsa
 }
 
 pub fn rsa_sign_pkcs1v15_digest(
-    key: &RsaPrivateKey,
+    key: &PrivateKey,
     hash: RsaHashAlgorithm,
     digest: &[u8],
 ) -> Result<Vec<u8>, RsaConstructionError> {
@@ -185,7 +215,7 @@ pub fn rsa_sign_pkcs1v15_digest(
 }
 
 pub fn rsa_verify_pkcs1v15_digest(
-    key: &RsaPublicKey,
+    key: &PublicKey,
     hash: RsaHashAlgorithm,
     digest: &[u8],
     signature: &[u8],
@@ -392,18 +422,18 @@ pub fn rsa_oaep_pad_digest(
 
 /// Decrypt an RSAES-PKCS1-v1_5 ciphertext and validate its type-2 encoding.
 pub fn rsa_decrypt_pkcs1v15(
-    key: &RsaPrivateKey,
+    key: &PrivateKey,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, RsaConstructionError> {
     if ciphertext.len() != key.size() {
         return Err(RsaConstructionError::InputTooLong);
     }
-    key.decrypt_blinded(&mut rsa::rand_core::OsRng, Pkcs1v15Encrypt, ciphertext)
-        .map_err(|_| RsaConstructionError::OperationFailed)
+    let encoded = zeroize::Zeroizing::new(private_operation(key, ciphertext)?);
+    rsa_pkcs1v15_unpad(&encoded)
 }
 
 pub fn rsa_encrypt_pkcs1v15(
-    key: &RsaPublicKey,
+    key: &PublicKey,
     plaintext: &[u8],
 ) -> Result<Vec<u8>, RsaConstructionError> {
     public_operation(key, &rsa_pkcs1v15_pad(plaintext, key.size())?)
@@ -412,7 +442,7 @@ pub fn rsa_encrypt_pkcs1v15(
 /// Decrypt RSAES-OAEP where the caller supplies the already-computed label
 /// digest, as required by the YubiHSM command protocol.
 pub fn rsa_decrypt_oaep_digest(
-    key: &RsaPrivateKey,
+    key: &PrivateKey,
     ciphertext: &[u8],
     label_digest: &[u8],
     mgf_hash: RsaHashAlgorithm,
@@ -424,7 +454,7 @@ pub fn rsa_decrypt_oaep_digest(
 }
 
 pub fn rsa_encrypt_oaep_digest(
-    key: &RsaPublicKey,
+    key: &PublicKey,
     plaintext: &[u8],
     label_digest: &[u8],
     mgf_hash: RsaHashAlgorithm,
@@ -474,24 +504,24 @@ pub fn pss_encoded_digest(
 }
 
 pub fn rsa_sign_pss_digest(
-    key: &RsaPrivateKey,
+    key: &PrivateKey,
     parameters: RsaPssParameters,
     digest: &[u8],
 ) -> Result<Vec<u8>, RsaConstructionError> {
     private_operation(
         key,
-        &pss_encoded_digest(key.n().bits(), parameters, digest)?,
+        &pss_encoded_digest(key.n().bit_width() as usize, parameters, digest)?,
     )
 }
 
 pub fn rsa_verify_pss_digest(
-    key: &RsaPublicKey,
+    key: &PublicKey,
     parameters: RsaPssParameters,
     digest: &[u8],
     signature: &[u8],
 ) -> Result<(), RsaConstructionError> {
     let recovered = public_operation(key, signature)?;
-    verify_pss_encoded_digest(&recovered, key.n().bits(), parameters, digest)
+    verify_pss_encoded_digest(&recovered, key.n().bit_width() as usize, parameters, digest)
 }
 
 pub fn verify_pss_encoded_digest(
@@ -557,9 +587,9 @@ pub fn verify_pss_encoded_digest(
 mod tests {
     use super::*;
 
-    fn key_pair() -> (RsaPrivateKey, RsaPublicKey) {
-        let private = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2_048).unwrap();
-        let public = RsaPublicKey::from(&private);
+    fn key_pair() -> (PrivateKey, PublicKey) {
+        let private = PrivateKey::new(&mut getrandom::SysRng, 2_048).unwrap();
+        let public = PublicKey::from(&private);
         (private, public)
     }
 
@@ -568,8 +598,8 @@ mod tests {
         let (private, public) = key_pair();
         for (sign, verify) in [
             (
-                rsa_sign_raw as fn(&RsaPrivateKey, &[u8]) -> _,
-                rsa_verify_raw as fn(&RsaPublicKey, &[u8], &[u8]) -> _,
+                rsa_sign_raw as fn(&PrivateKey, &[u8]) -> _,
+                rsa_verify_raw as fn(&PublicKey, &[u8], &[u8]) -> _,
             ),
             (rsa_sign_pkcs1v15_payload, rsa_verify_pkcs1v15_payload),
         ] {
@@ -766,6 +796,19 @@ mod tests {
     #[test]
     fn raw_rsa_rejects_out_of_range_inputs_and_wrong_signature_sizes() {
         let (private, public) = key_pair();
+        let encrypted = rsa_public_raw(&public, &[2]).unwrap();
+        let decrypted = rsa_sign_raw(&private, &encrypted).unwrap();
+        assert_eq!(decrypted.len(), private.size());
+        assert!(
+            decrypted[..decrypted.len() - 1]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+        assert_eq!(decrypted.last(), Some(&2));
+        assert_eq!(
+            rsa_public_raw(&public, &public.n().to_be_bytes()),
+            Err(RsaConstructionError::InputOutOfRange)
+        );
         assert_eq!(
             rsa_sign_raw(&private, &vec![0xff; private.size() + 1]),
             Err(RsaConstructionError::InputTooLong)

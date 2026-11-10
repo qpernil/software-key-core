@@ -6,39 +6,53 @@
 use crate::rsa_private_validation::{
     RsaPrivateValidationError, validate_rsa_private_key, validation_strength,
 };
+use num_bigint_dig::BigUint;
 use rsa::{
-    BigUint, RsaPrivateKey, RsaPublicKey,
+    PrivateKey, PublicKey,
     pkcs1::DecodeRsaPrivateKey,
     pkcs8::DecodePrivateKey,
-    rand_core::CryptoRngCore,
+    rand_core::TryCryptoRng,
     traits::{PrivateKeyParts, PublicKeyParts},
 };
 use std::{fmt, ops::Deref, sync::Arc};
 use zeroize::ZeroizeOnDrop;
+
+// Integer conversions are limited to parsing and import validation. Private
+// operations use crypto-bigint inside RSA; temporary secret encodings are wiped.
+pub(crate) fn boxed(value: BigUint) -> rsa::BoxedUint {
+    let value = zeroize::Zeroizing::new(value);
+    let bytes = zeroize::Zeroizing::new(value.to_bytes_be());
+    rsa::BoxedUint::from_be_slice_vartime(&bytes)
+}
+
+pub(crate) fn unsigned(value: &rsa::BoxedUint) -> BigUint {
+    let bytes = zeroize::Zeroizing::new(value.to_be_bytes());
+    BigUint::from_bytes_be(&bytes)
+}
 
 /// An immutable RSA key whose construction stays inside this module.
 /// A raw RustCrypto private key cannot be inserted into a software token key.
 ///
 /// ```compile_fail
 /// use software_key_core::software_signing::SoftwareSigningKey;
-/// let raw = rsa::RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 1024).unwrap();
+/// let raw = rsa::PrivateKey::new(&mut getrandom::SysRng, 1024).unwrap();
 /// let unchecked = SoftwareSigningKey::Rsa(std::sync::Arc::new(raw));
 /// ```
 #[derive(Clone)]
 pub struct RsaKey {
-    key: Arc<RsaPrivateKey>,
+    key: Arc<PrivateKey>,
     validated: bool,
 }
 impl ZeroizeOnDrop for RsaKey {}
 impl fmt::Debug for RsaKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RsaKey")
-            .field("bits", &self.key.n().bits())
+            .field("bits", &(self.key.n().bit_width() as usize))
             .finish_non_exhaustive()
     }
 }
 impl Deref for RsaKey {
-    type Target = Arc<RsaPrivateKey>;
+    type Target = Arc<PrivateKey>;
     fn deref(&self) -> &Self::Target {
         &self.key
     }
@@ -46,18 +60,18 @@ impl Deref for RsaKey {
 
 impl RsaKey {
     pub fn modulus_bits(&self) -> usize {
-        self.key.n().bits()
+        self.key.n().bit_width() as usize
     }
     pub fn generate(bits: usize) -> Result<Self, RsaPrivateValidationError> {
-        Self::generate_with_rng(&mut rsa::rand_core::OsRng, bits)
+        Self::generate_with_rng(&mut getrandom::SysRng, bits)
     }
     /// Caller-supplied cryptographic RNG, also useful for reproducible benchmarks.
     pub fn generate_with_rng(
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl TryCryptoRng,
         bits: usize,
     ) -> Result<Self, RsaPrivateValidationError> {
         validation_strength(bits).ok_or(RsaPrivateValidationError::InvalidPrivateKey)?;
-        let generated = RsaPrivateKey::new(rng, bits)
+        let generated = PrivateKey::new_unchecked(rng, bits)
             .map_err(|_| RsaPrivateValidationError::RandomnessUnavailable)?;
         Self::finish_import(generated)
     }
@@ -86,13 +100,20 @@ impl RsaKey {
         {
             return Err(InvalidPrivateKey);
         }
-        RsaPublicKey::new_with_max_size(
-            n.clone(),
-            e.clone(),
-            crate::rsa_private_validation::MAX_RSA_BITS,
+        PublicKey::new_with_size_limits(
+            boxed(n.clone()),
+            boxed(e.clone()),
+            crate::rsa_private_validation::MIN_RSA_BITS
+                ..=crate::rsa_private_validation::MAX_RSA_BITS,
         )
         .map_err(|_| InvalidPrivateKey)?;
-        let key = RsaPrivateKey::from_components(n, e, d, primes).map_err(|_| InvalidPrivateKey)?;
+        let key = PrivateKey::from_components(
+            boxed(n),
+            boxed(e),
+            boxed(d),
+            primes.into_iter().map(boxed).collect(),
+        )
+        .map_err(|_| InvalidPrivateKey)?;
         Self::finish_import(key)
     }
     pub fn import_pkcs8(encoded: &[u8]) -> Result<Self, RsaPrivateValidationError> {
@@ -107,26 +128,26 @@ impl RsaKey {
         }
         Self::finish_import((*self.key).clone())
     }
-    fn finish_import(key: RsaPrivateKey) -> Result<Self, RsaPrivateValidationError> {
+    fn finish_import(key: PrivateKey) -> Result<Self, RsaPrivateValidationError> {
         use RsaPrivateValidationError::InvalidPrivateKey;
-        let bits = key.n().bits();
+        let bits = key.n().bit_width() as usize;
         validation_strength(bits).ok_or(InvalidPrivateKey)?;
         if key.primes().len() != 2 {
             return Err(InvalidPrivateKey);
         }
         // The parser checks supplied n/e/d for algebraic consistency. Normalize
         // the private exponent and derive CRT parameters; discard supplied CRT.
-        let mut normalized = RsaPrivateKey::from_p_q(
-            key.primes()[0].clone(),
-            key.primes()[1].clone(),
+        let mut normalized = PrivateKey::from_p_q(
+            key.primes()[0].as_ref().clone(),
+            key.primes()[1].as_ref().clone(),
             key.e().clone(),
         )
         .map_err(|_| InvalidPrivateKey)?;
         normalized.precompute().map_err(|_| InvalidPrivateKey)?;
         Self::admit_normalized(normalized)
     }
-    fn admit_normalized(key: RsaPrivateKey) -> Result<Self, RsaPrivateValidationError> {
-        validate_rsa_private_key(&key, key.n().bits())?;
+    fn admit_normalized(key: PrivateKey) -> Result<Self, RsaPrivateValidationError> {
+        validate_rsa_private_key(&key, key.n().bit_width() as usize)?;
         Ok(Self {
             key: Arc::new(key),
             validated: true,
@@ -144,7 +165,8 @@ impl RsaKey {
         {
             return Err(InvalidPrivateKey);
         }
-        let key = RsaPrivateKey::from_p_q(p, q, e).map_err(|_| InvalidPrivateKey)?;
+        let key =
+            PrivateKey::from_p_q(boxed(p), boxed(q), boxed(e)).map_err(|_| InvalidPrivateKey)?;
         Ok(Self {
             key: Arc::new(key),
             validated: false,
@@ -152,7 +174,7 @@ impl RsaKey {
     }
     /// Trusted persisted state only. Untrusted PKCS#8 must use `import_pkcs8`.
     pub fn restore_pkcs8(encoded: &[u8]) -> Result<Self, RsaPrivateValidationError> {
-        let key = RsaPrivateKey::from_pkcs8_der(encoded)
+        let key = PrivateKey::from_pkcs8_der(encoded)
             .map_err(|_| RsaPrivateValidationError::InvalidPrivateKey)?;
         Ok(Self {
             key: Arc::new(key),
@@ -161,7 +183,7 @@ impl RsaKey {
     }
     /// Trusted software-token persistence format.
     pub fn restore_pkcs1(encoded: &[u8]) -> Result<Self, RsaPrivateValidationError> {
-        let key = RsaPrivateKey::from_pkcs1_der(encoded)
+        let key = PrivateKey::from_pkcs1_der(encoded)
             .map_err(|_| RsaPrivateValidationError::InvalidPrivateKey)?;
         Ok(Self {
             key: Arc::new(key),
@@ -175,13 +197,17 @@ impl RsaKey {
 pub fn import_public(
     n: BigUint,
     e: BigUint,
-) -> Result<RsaPublicKey, crate::rsa_public_validation::RsaPublicValidationError> {
-    let key = RsaPublicKey::new_with_max_size(n, e, crate::rsa_private_validation::MAX_RSA_BITS)
-        .map_err(|_| crate::rsa_public_validation::RsaPublicValidationError::InvalidPublicKey)?;
+) -> Result<PublicKey, crate::rsa_public_validation::RsaPublicValidationError> {
+    let key = PublicKey::new_with_size_limits(
+        boxed(n),
+        boxed(e),
+        crate::rsa_private_validation::MIN_RSA_BITS..=crate::rsa_private_validation::MAX_RSA_BITS,
+    )
+    .map_err(|_| crate::rsa_public_validation::RsaPublicValidationError::InvalidPublicKey)?;
     crate::rsa_public_validation::validate_rsa_public_key(
-        &key.n().to_bytes_be(),
-        &key.e().to_bytes_be(),
-        key.n().bits(),
+        &key.n().to_be_bytes_trimmed_vartime(),
+        &key.e().to_be_bytes_trimmed_vartime(),
+        key.n().bit_width() as usize,
     )?;
     Ok(key)
 }
@@ -190,6 +216,29 @@ pub fn import_public(
 mod tests {
     use super::*;
     use rsa::pkcs8::EncodePrivateKey;
+
+    #[test]
+    fn legacy_rsa_size_round_trips_persistence_and_public_projection() {
+        let key = RsaKey::generate(512).unwrap();
+        let encoded = key.to_pkcs8_der().unwrap();
+        let restored = RsaKey::restore_pkcs8(encoded.as_bytes()).unwrap();
+        assert_eq!(key.n(), restored.n());
+        let signing = crate::software_signing::SoftwareSigningKey::Rsa(restored);
+        let public = signing.public_key();
+        let signature = signing
+            .sign_message(
+                crate::software_signing::SignatureScheme::RsaPkcs1Sha256,
+                b"legacy RSA size",
+            )
+            .unwrap();
+        public
+            .verify_message(
+                crate::software_signing::SignatureScheme::RsaPkcs1Sha256,
+                b"legacy RSA size",
+                signature.as_bytes(),
+            )
+            .unwrap();
+    }
 
     #[test]
     fn quality_validation_is_separate_from_nist_acceptance() {
@@ -212,24 +261,23 @@ mod tests {
         assert!(check_nist_acceptance(2049, &BigUint::from(65537u32)).is_err());
         let odd = RsaKey::generate(1025).unwrap();
         assert_eq!(odd.modulus_bits(), 1025);
-        import_public(odd.n().clone(), odd.e().clone()).unwrap();
+        import_public(unsigned(odd.n()), unsigned(odd.e())).unwrap();
         assert!(check_nist_acceptance(2048, &BigUint::from(3u8)).is_err());
         // The same mathematical checks remain useful for a legacy size/exponent.
-        let raw =
-            RsaPrivateKey::new_with_exp(&mut rsa::rand_core::OsRng, 1024, &BigUint::from(3u8))
-                .unwrap();
+        let raw = PrivateKey::new_with_exp(&mut getrandom::SysRng, 1024, boxed(BigUint::from(3u8)))
+            .unwrap();
         let key = RsaKey::import_components(
-            raw.n().clone(),
-            raw.e().clone(),
-            raw.d().clone(),
-            raw.primes().to_vec(),
+            unsigned(raw.n()),
+            unsigned(raw.e()),
+            unsigned(raw.d()),
+            raw.primes().iter().map(|p| unsigned(p)).collect(),
         )
         .unwrap();
         assert!(key.validated);
-        assert_eq!(key.e(), &BigUint::from(3u8));
+        assert_eq!(unsigned(key.e()), BigUint::from(3u8));
         crate::rsa_public_validation::validate_rsa_public_key(
-            &key.n().to_bytes_be(),
-            &key.e().to_bytes_be(),
+            &key.n().to_be_bytes_trimmed_vartime(),
+            &key.e().to_be_bytes_trimmed_vartime(),
             1024,
         )
         .unwrap();
@@ -237,10 +285,10 @@ mod tests {
 
     #[test]
     fn pkcs8_discards_supplied_crt_and_normalizes_private_exponent() {
-        let raw = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 1024).unwrap();
+        let raw = PrivateKey::new(&mut getrandom::SysRng, 1024).unwrap();
         let encoded = raw.to_pkcs8_der().unwrap();
-        let info = rsa::pkcs8::PrivateKeyInfo::try_from(encoded.as_bytes()).unwrap();
-        let fields = rsa::pkcs1::RsaPrivateKey::try_from(info.private_key).unwrap();
+        let info = rsa::pkcs8::PrivateKeyInfoRef::try_from(encoded.as_bytes()).unwrap();
+        let fields = rsa::pkcs1::RsaPrivateKeyRef::try_from(info.private_key).unwrap();
         let offsets = [
             fields.exponent1.as_bytes(),
             fields.exponent2.as_bytes(),
@@ -275,30 +323,31 @@ mod tests {
     fn every_private_import_rejects_algebraically_consistent_composite_factors() {
         let valid = RsaKey::generate(1024).unwrap();
         let p = (BigUint::from(1u8) << 512) - 1u8;
-        let q = valid.primes()[1].clone();
-        let raw = RsaPrivateKey::from_p_q(p.clone(), q.clone(), valid.e().clone()).unwrap();
+        let q = unsigned(&valid.primes()[1]);
+        let raw =
+            PrivateKey::from_p_q(boxed(p.clone()), boxed(q.clone()), valid.e().clone()).unwrap();
         raw.validate().unwrap();
-        assert!(RsaKey::import_primes(p.clone(), q.clone(), valid.e().clone()).is_err());
+        assert!(RsaKey::import_primes(p.clone(), q.clone(), unsigned(valid.e())).is_err());
         assert!(
             RsaKey::import_components(
-                raw.n().clone(),
-                raw.e().clone(),
-                raw.d().clone(),
-                raw.primes().to_vec()
+                unsigned(raw.n()),
+                unsigned(raw.e()),
+                unsigned(raw.d()),
+                raw.primes().iter().map(|p| unsigned(p)).collect()
             )
             .is_err()
         );
         assert!(
             RsaKey::import_components(
-                raw.n().clone(),
-                raw.e().clone(),
-                raw.d().clone(),
+                unsigned(raw.n()),
+                unsigned(raw.e()),
+                unsigned(raw.d()),
                 Vec::new()
             )
             .is_err()
         );
         assert!(RsaKey::import_pkcs8(raw.to_pkcs8_der().unwrap().as_bytes()).is_err());
-        let restored = RsaKey::restore_primes(p, q, valid.e().clone()).unwrap();
+        let restored = RsaKey::restore_primes(p, q, unsigned(valid.e())).unwrap();
         assert!(restored.validate_for_import().is_err());
     }
 
@@ -331,9 +380,9 @@ mod tests {
                 .collect();
             let key = RsaKey::import_pkcs8(&encoded).unwrap();
             let rebuilt = RsaKey::import_primes(
-                key.primes()[0].clone(),
-                key.primes()[1].clone(),
-                key.e().clone(),
+                unsigned(&key.primes()[0]),
+                unsigned(&key.primes()[1]),
+                unsigned(key.e()),
             )
             .unwrap();
             assert_eq!(key.n(), rebuilt.n());

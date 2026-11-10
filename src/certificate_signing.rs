@@ -15,7 +15,7 @@ use der::{
     Decode, Encode,
     asn1::{Any, BitString},
 };
-use rsa::{BigUint, RsaPublicKey, pkcs8::EncodePublicKey as EncodeRsaPublicKey};
+use rsa::{PublicKey, pkcs8::EncodePublicKey as EncodeRsaPublicKey};
 use signature::{Keypair, Signer};
 use spki::{
     AlgorithmIdentifierOwned, DynSignatureAlgorithmIdentifier, SignatureBitStringEncoding,
@@ -166,9 +166,11 @@ pub fn subject_public_key_info(
             })
         }
         SoftwarePublicKey::Rsa { modulus, exponent } => {
-            let public = RsaPublicKey::new(
-                BigUint::from_bytes_be(modulus),
-                BigUint::from_bytes_be(exponent),
+            let public = PublicKey::new_with_size_limits(
+                rsa::BoxedUint::from_be_slice_vartime(modulus),
+                rsa::BoxedUint::from_be_slice_vartime(exponent),
+                crate::rsa_private_validation::MIN_RSA_BITS
+                    ..=crate::rsa_private_validation::MAX_RSA_BITS,
             )
             .map_err(|_| X509SigningError)?;
             let encoded = public.to_public_key_der().map_err(|_| X509SigningError)?;
