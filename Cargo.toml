@@ -14,14 +14,14 @@ x509-signing = ["dep:const-oid", "dep:der", "dep:spki"]
 x509-validation = ["dep:const-oid", "dep:der", "dep:spki", "dep:x509-cert", "dep:rustls-pki-types", "dep:webpki", "dep:certval"]
 
 [dependencies]
-certval = { version = "0.2.0-rc.1", default-features = false, features = ["std"], optional = true }
-const-oid = { version = "0.10.2", optional = true }
+certval = { version = "0.2.0-rc.4", default-features = false, features = ["std"], optional = true }
+const-oid = { version = "0.10.3", optional = true }
 der = { version = "0.8.3", features = ["alloc", "derive", "std"], optional = true }
-spki = { version = "0.8.0", features = ["alloc", "std"], optional = true }
-x509-cert = { version = "0.3.0", default-features = false, features = ["std"], optional = true }
-rustls-pki-types = { version = "1.15.1", optional = true }
-webpki = { package = "rustls-webpki", version = "0.103.13", features = ["ring", "std"], optional = true }
-aes = "0.9.3"
+spki = { version = "0.8.1", features = ["alloc", "std"], optional = true }
+x509-cert = { version = "0.3.1", default-features = false, features = ["std"], optional = true }
+rustls-pki-types = { version = "1.16.0", optional = true }
+webpki = { package = "rustls-webpki", version = "0.103.17", features = ["ring", "std"], optional = true }
+aes = "0.9.4"
 aes-kw = { version = "0.3.1", default-features = false }
 bp256 = { version = "0.14.0", default-features = false, features = ["arithmetic", "ecdsa", "pkcs8", "sha256", "std"] }
 bp384 = { version = "0.14.0", default-features = false, features = ["arithmetic", "ecdsa", "pkcs8", "sha384", "std"] }
@@ -36,8 +36,8 @@ hkdf = "0.13.0"
 hmac = "0.13.0"
 k256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "std"] }
 ml-dsa = { version = "0.1.2", default-features = false, features = ["alloc", "getrandom", "pkcs8", "zeroize"] }
-ml-kem = { version = "0.3.3", features = ["pkcs8", "zeroize"] }
-module-lattice = { version = "0.2.3", features = ["zeroize"] }
+ml-kem = { version = "0.3.4", features = ["pkcs8", "zeroize"] }
+module-lattice = { version = "0.2.4", features = ["zeroize"] }
 num-bigint-dig = { version = "0.8.6", features = ["zeroize"] }
 num-integer = "0.1.47"
 pbkdf2 = { version = "0.13.0", features = ["hmac"] }
@@ -51,18 +51,18 @@ primefield = "0.14.0"
 primeorder = "0.14.0"
 rsa = { version = "0.10.0", default-features = false, features = ["encoding", "getrandom", "hazmat", "pkcs1v15", "std"] }
 sha1 = "0.11.0"
-sha2 = "0.11.0"
+sha2 = "0.11.1"
 sha3 = "0.11.0"
 signature = "3.0.0"
 subtle = "2.6.1"
 x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
 x448 = { version = "0.14.0-pre.12", default-features = false, features = ["static_secrets"] }
-zeroize = "1.9.0"
+zeroize = "1.9.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2.191", optional = true }
 
 [dev-dependencies]
-rand = "0.10.3"
-serde_json = "1.0.149"
-flate2 = "1.1.9"
+rand = "0.10.4"
+serde_json = "1.0.154"
+flate2 = "1.1.11"
